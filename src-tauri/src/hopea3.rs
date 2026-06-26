@@ -99,7 +99,7 @@ const OD_MAX_TORQUE: u16 = 0x6072; // u16 ‰ of peak
 
 /// Placeholder mapping object for the bytes belonging to *other* motors. Using
 /// the vendor object the proven reference implementation uses (`0x3000:03`,
-/// 32-bit) rather than a CiA dummy, since HEX firmware is known to accept it.
+/// 32-bit) rather than a CiA dummy, since the motor firmware is known to accept it.
 /// One per 4 bytes ⇒ two per 8-byte slice.
 const PAD_ENTRY: TpdoEntry = TpdoEntry {
     index: 0x3000,
