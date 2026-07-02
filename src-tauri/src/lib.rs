@@ -11,6 +11,7 @@ mod dto;
 mod hopea3;
 mod imu;
 mod logging;
+mod sdo_client;
 mod smartknob;
 mod state;
 mod zenoh_arm;
@@ -77,6 +78,8 @@ pub fn run() {
             commands::analyzer_get_status,
             commands::analyzer_clear,
             commands::analyzer_send,
+            commands::analyzer_sdo_read,
+            commands::analyzer_sdo_write,
             commands::zenoh_connect,
             commands::zenoh_disconnect,
             commands::zenoh_discover,

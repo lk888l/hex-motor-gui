@@ -24,11 +24,13 @@ import {
   Statistic,
   Switch,
   Table,
+  Tabs,
   Tag,
   Tooltip,
   Typography,
 } from "antd";
 import { api, errMsg } from "../api";
+import { nid2hex, parseNid } from "../format";
 import { useI18n } from "../i18n";
 import { decodeCanopen, kindColor } from "../canopen";
 import { useCanTrace, ACTIVE_WINDOW_MS, type CanMode } from "../useCanTrace";
@@ -46,13 +48,23 @@ const DEFAULT_IFACE = navigator.userAgent.includes("Linux") ? "can0" : "gs_usb0"
 const idHex = (id: number, extended: boolean) =>
   "0x" + id.toString(16).toUpperCase().padStart(extended ? 8 : 3, "0");
 
-const hexOk = (s: string) => /^\s*(0x)?[0-9a-fA-F]+\s*$/.test(s);
+const hexOk = (s: string) => /^\s*(0x)?[0-9a-fA-F]+\s*$/i.test(s);
 
+/** Strict hex parse (CAN ids / masks are conventionally hex, bare or 0x-prefixed).
+ *  Throws on trailing garbage instead of silently truncating like parseInt. */
 function parseHexId(s: string): number {
-  const t = s.trim().toLowerCase();
-  const n = t.startsWith("0x") ? parseInt(t.slice(2), 16) : parseInt(t, 16);
-  if (!Number.isInteger(n) || n < 0) throw new Error(`bad id '${s}'`);
-  return n;
+  if (!hexOk(s)) throw new Error(`bad hex '${s}'`);
+  return parseInt(s.trim().replace(/^0x/i, ""), 16);
+}
+
+/** CiA-309 integer, comeow semantics: bare digits = DECIMAL, 0x… = hex.
+ *  Used by the SDO tab so index/sub/node all read the same way as comeow. */
+const cia309Ok = (s: string) => /^\s*(0x[0-9a-fA-F]+|[0-9]+)\s*$/i.test(s);
+function parseCia309Int(s: string): number {
+  const t = s.trim();
+  if (/^0x[0-9a-fA-F]+$/i.test(t)) return parseInt(t.slice(2), 16);
+  if (/^[0-9]+$/.test(t)) return parseInt(t, 10);
+  throw new Error(`bad number '${s}' (decimal or 0x-hex)`);
 }
 
 function parseHexBytes(s: string): number[] {
@@ -276,9 +288,27 @@ export function CanAnalyzerPanel() {
           )}
         </Col>
 
-        {/* manual send */}
+        {/* manual send / SDO client — 二选一 */}
         <Col flex="340px">
-          <SendWidget running={running} fd={status?.fd ?? false} maxDlen={status?.max_dlen ?? 8} />
+          <Card size="small" styles={{ body: { paddingTop: 0 } }}>
+            <Tabs
+              size="small"
+              items={[
+                {
+                  key: "send",
+                  label: t("canTabSend"),
+                  children: (
+                    <SendWidget running={running} fd={status?.fd ?? false} maxDlen={status?.max_dlen ?? 8} />
+                  ),
+                },
+                {
+                  key: "sdo",
+                  label: "SDO",
+                  children: <SdoWidget running={running} />,
+                },
+              ]}
+            />
+          </Card>
         </Col>
       </Row>
     </Space>
@@ -580,8 +610,7 @@ function SendWidget({ running, fd, maxDlen }: { running: boolean; fd: boolean; m
 
   const maxBytes = isFd && fd ? maxDlen : 8;
   return (
-    <Card size="small" title={t("canSendTitle")}>
-      <Space direction="vertical" size={8} style={{ width: "100%" }}>
+    <Space direction="vertical" size={8} style={{ width: "100%" }}>
         <Input addonBefore={t("canId")} value={idStr} onChange={(e) => setIdStr(e.target.value)} />
         <Space wrap>
           <Checkbox checked={ext} onChange={(e) => setExt(e.target.checked)}>{t("canExt")}</Checkbox>
@@ -627,7 +656,165 @@ function SendWidget({ running, fd, maxDlen }: { running: boolean; fd: boolean; m
             {repeating ? t("canStop") : t("canRepeat")}
           </Button>
         </Space>
+    </Space>
+  );
+}
+
+// ───────────────────────── SDO tab (comeow engine) ─────────────────────────
+
+/** CiA-309 datatype tokens, same set as comeow. "raw" = read without a type. */
+const SDO_TYPES = [
+  "raw", "b", "u8", "u16", "u32", "u64", "x8", "x16", "x32", "x64",
+  "i8", "i16", "i32", "i64", "r32", "r64", "vs", "hex",
+];
+
+interface SdoLogLine {
+  id: number;
+  text: string;
+  ok: boolean;
+}
+
+function SdoWidget({ running }: { running: boolean }) {
+  const { t } = useI18n();
+  const [nodeStr, setNodeStr] = useState("0x10");
+  const [indexStr, setIndexStr] = useState("0x1018");
+  const [subStr, setSubStr] = useState("0x00");
+  const [dtype, setDtype] = useState("raw");
+  const [valueStr, setValueStr] = useState("");
+  const [timeoutMs, setTimeoutMs] = useState(500);
+  const [retries, setRetries] = useState(1);
+  const [busy, setBusy] = useState(false);
+  const [log, setLog] = useState<SdoLogLine[]>([]);
+  const logIdRef = useRef(0);
+  const logRef = useRef<HTMLDivElement>(null);
+
+  // Keep the result console scrolled to the newest line.
+  useEffect(() => {
+    const el = logRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [log]);
+
+  const append = (text: string, ok: boolean) =>
+    setLog((l) => [...l.slice(-199), { id: ++logIdRef.current, text, ok }]);
+
+  const run = async (op: "r" | "w") => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      // comeow semantics on all three fields: bare digits = decimal, 0x = hex.
+      const node = parseNid(nodeStr);
+      const index = parseCia309Int(indexStr);
+      const sub = parseCia309Int(subStr);
+      if (index > 0xffff) throw new Error(`index > 0xFFFF: ${indexStr}`);
+      if (sub > 0xff) throw new Error(`sub > 0xFF: ${subStr}`);
+      const res =
+        op === "r"
+          ? await api.analyzerSdoRead(node, index, sub, dtype === "raw" ? null : dtype, timeoutMs, retries)
+          : await api.analyzerSdoWrite(node, index, sub, dtype, valueStr, timeoutMs, retries);
+      append(`${op} ${nid2hex(node)}  ${res}`, true);
+    } catch (e) {
+      append(`✗ ${errMsg(e)}`, false);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Space direction="vertical" size={8} style={{ width: "100%" }}>
+      <Space.Compact style={{ width: "100%" }}>
+        <Input
+          addonBefore={t("canNode")}
+          value={nodeStr}
+          onChange={(e) => setNodeStr(e.target.value)}
+          status={cia309Ok(nodeStr) ? undefined : "error"}
+        />
+      </Space.Compact>
+      <Tooltip title={t("canSdoRadixHint")}>
+        <Space.Compact style={{ width: "100%" }}>
+          <Input
+            addonBefore={t("canSdoIndex")}
+            value={indexStr}
+            onChange={(e) => setIndexStr(e.target.value)}
+            status={cia309Ok(indexStr) ? undefined : "error"}
+            style={{ width: "62%" }}
+          />
+          <Input
+            addonBefore={t("canSdoSub")}
+            value={subStr}
+            onChange={(e) => setSubStr(e.target.value)}
+            status={cia309Ok(subStr) ? undefined : "error"}
+            style={{ width: "38%" }}
+          />
+        </Space.Compact>
+      </Tooltip>
+      <Space.Compact style={{ width: "100%" }}>
+        <Select
+          value={dtype}
+          onChange={setDtype}
+          options={SDO_TYPES.map((v) => ({ value: v, label: v === "raw" ? t("canSdoTypeRaw") : v }))}
+          style={{ width: "38%" }}
+        />
+        <Input
+          value={valueStr}
+          onChange={(e) => setValueStr(e.target.value)}
+          placeholder={t("canSdoValue")}
+          style={{ width: "62%" }}
+        />
+      </Space.Compact>
+      <Space>
+        <Button type="primary" loading={busy} disabled={!running} onClick={() => run("r")}>
+          {t("canSdoRead")}
+        </Button>
+        <Tooltip title={dtype === "raw" ? t("canSdoNeedType") : undefined}>
+          <Button danger loading={busy} disabled={!running || dtype === "raw"} onClick={() => run("w")}>
+            {t("canSdoWrite")}
+          </Button>
+        </Tooltip>
+        <Button size="small" onClick={() => setLog([])}>
+          {t("canClear")}
+        </Button>
       </Space>
-    </Card>
+      <Space>
+        <InputNumber
+          min={10}
+          value={timeoutMs}
+          onChange={(v) => setTimeoutMs(v ?? 500)}
+          addonAfter="ms"
+          style={{ width: 130 }}
+        />
+        <InputNumber
+          min={0}
+          max={10}
+          value={retries}
+          onChange={(v) => setRetries(v ?? 1)}
+          addonBefore={t("canSdoRetries")}
+          style={{ width: 130 }}
+        />
+      </Space>
+      <div
+        ref={logRef}
+        style={{
+          height: 170,
+          overflow: "auto",
+          fontFamily: "monospace",
+          fontSize: 12,
+          background: "rgba(0,0,0,0.25)",
+          borderRadius: 6,
+          padding: "6px 8px",
+        }}
+      >
+        {log.length === 0 ? (
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            {t("canSdoLogEmpty")}
+          </Typography.Text>
+        ) : (
+          log.map((l) => (
+            <div key={l.id} style={{ color: l.ok ? "#ddd" : "#ff7875", whiteSpace: "pre-wrap" }}>
+              {l.text}
+            </div>
+          ))
+        )}
+      </div>
+    </Space>
   );
 }

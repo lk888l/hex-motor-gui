@@ -85,6 +85,12 @@ export const api = {
   analyzerGetStatus: () => invoke<CanAnalyzerStatus>("analyzer_get_status"),
   analyzerClear: () => invoke<number>("analyzer_clear"),
   analyzerSend: (spec: CanSendSpec) => invoke<void>("analyzer_send", { spec }),
+  // SDO tab (comeow engine over the analyzer's bus). dtype = CiA-309 token
+  // ("u16", "x32", "vs", …) or null for raw-hex rendering on reads.
+  analyzerSdoRead: (node: number, index: number, sub: number, dtype: string | null, timeoutMs: number, retries: number) =>
+    invoke<string>("analyzer_sdo_read", { node, index, sub, dtype, timeoutMs, retries }),
+  analyzerSdoWrite: (node: number, index: number, sub: number, dtype: string, value: string, timeoutMs: number, retries: number) =>
+    invoke<string>("analyzer_sdo_write", { node, index, sub, dtype, value, timeoutMs, retries }),
 
   // Base(Zenoh)
   zenohConnect: (connect: string) => invoke<void>("zenoh_connect", { connect }),

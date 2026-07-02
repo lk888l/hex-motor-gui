@@ -1735,6 +1735,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "can-transport",
+ "canopen-sdo",
  "chrono",
  "env_logger",
  "hex-arm-dynamics",

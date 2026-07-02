@@ -384,6 +384,10 @@ pub struct CanAnalyzer {
     status: Arc<AnalyzerStatus>,
     std_task: JoinHandle<()>,
     ext_task: JoinHandle<()>,
+    /// Serializes SDO-tab operations (one transfer at a time, like comeow's
+    /// single executor task). Cloned out of the session together with `bus`
+    /// so commands never hold the `AppState.analyzer` guard across the await.
+    sdo_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl CanAnalyzer {
@@ -418,7 +422,15 @@ impl CanAnalyzer {
             status,
             std_task,
             ext_task,
+            sdo_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
+    }
+
+    /// The analyzer's bus + the SDO serialization lock, cloned out so the
+    /// caller can drop the `AppState.analyzer` guard before awaiting a
+    /// (possibly seconds-long, with retries) SDO transfer.
+    pub fn sdo_handles(&self) -> (Arc<dyn CanBus>, Arc<tokio::sync::Mutex<()>>) {
+        (self.bus.clone(), self.sdo_lock.clone())
     }
 
     /// Cursor-based trace slice: frames with `seq > after_seq`, up to `max`, that
@@ -554,6 +566,11 @@ impl CanAnalyzer {
         self.ext_task.abort();
         let _ = self.std_task.await;
         let _ = self.ext_task.await;
+        // Drain any in-flight SDO transfer (bounded by its timeout × attempts):
+        // the transfer holds a clone of our bus Arc, and on gs_usb the USB device
+        // stays exclusively claimed until every clone drops — an immediate
+        // restart would otherwise fail to open the adapter.
+        let _ = self.sdo_lock.lock().await;
         log::info!("CAN analyzer stopped");
         // `bus` (Arc<dyn CanBus>) drops here → the backend reader task stops.
     }

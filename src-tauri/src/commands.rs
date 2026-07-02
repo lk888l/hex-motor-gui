@@ -602,6 +602,77 @@ pub async fn analyzer_send(
     app.send(spec).await.map_err(err)
 }
 
+/// Clone the SDO handles out of the analyzer guard so the (possibly
+/// seconds-long, retrying) transfer never blocks the trace-poll commands.
+async fn sdo_handles(
+    state: &AppState,
+) -> CmdResult<(
+    std::sync::Arc<dyn can_transport::CanBus>,
+    std::sync::Arc<tokio::sync::Mutex<()>>,
+)> {
+    let guard = state.analyzer.lock().await;
+    let app = guard
+        .as_ref()
+        .ok_or_else(|| "analyzer not running".to_string())?;
+    Ok(app.sdo_handles())
+}
+
+/// SDO read (upload) on the analyzer's bus — the comeow engine. `dtype` is a
+/// CiA-309 token (`u16`, `x32`, `vs`, …) or `None` for raw-hex rendering.
+#[tauri::command]
+pub async fn analyzer_sdo_read(
+    state: State<'_, AppState>,
+    node: u8,
+    index: u16,
+    sub: u8,
+    dtype: Option<String>,
+    timeout_ms: u64,
+    retries: u8,
+) -> CmdResult<String> {
+    let (bus, lock) = sdo_handles(&state).await?;
+    let _serialized = lock.lock().await; // one SDO transfer at a time
+    crate::sdo_client::read(
+        &bus,
+        node,
+        index,
+        sub,
+        dtype.as_deref(),
+        std::time::Duration::from_millis(timeout_ms.max(10)),
+        // canopen-sdo's parameter is *total attempts* (clamped ≥1); the UI
+        // exposes "retries", so N retries = N+1 attempts.
+        retries.saturating_add(1),
+    )
+    .await
+}
+
+/// SDO write (download) on the analyzer's bus. Value is encoded per `dtype`.
+#[tauri::command]
+pub async fn analyzer_sdo_write(
+    state: State<'_, AppState>,
+    node: u8,
+    index: u16,
+    sub: u8,
+    dtype: String,
+    value: String,
+    timeout_ms: u64,
+    retries: u8,
+) -> CmdResult<String> {
+    let (bus, lock) = sdo_handles(&state).await?;
+    let _serialized = lock.lock().await;
+    crate::sdo_client::write(
+        &bus,
+        node,
+        index,
+        sub,
+        &dtype,
+        &value,
+        std::time::Duration::from_millis(timeout_ms.max(10)),
+        // Total attempts = UI retries + 1 (see analyzer_sdo_read).
+        retries.saturating_add(1),
+    )
+    .await
+}
+
 // ───────────────────────── Base(Zenoh) ─────────────────────────
 
 /// 连接到控制器网络。`connect` 如 `tcp/127.0.0.1:7447`(空=仅多播发现)。
