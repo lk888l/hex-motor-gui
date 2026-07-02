@@ -3,7 +3,7 @@
 // snake_case parameters.
 
 import { invoke } from "@tauri-apps/api/core";
-import type { ArmInfo, BaseInfo, Hopea3InitProgress, Hopea3State, ImuState, KnobConfig, LiveState, MotorInfo, MotorMode, MotorTarget, SmartKnobState, ZenohArmState, ZenohBaseState } from "./types";
+import type { ArmInfo, BaseInfo, CanAggReply, CanAnalyzerStatus, CanFilterSpec, CanSendSpec, CanTraceReply, Hopea3InitProgress, Hopea3State, ImuState, KnobConfig, LiveState, MotorInfo, MotorMode, MotorTarget, SmartKnobState, ZenohArmState, ZenohBaseState } from "./types";
 
 export const api = {
   connect: (iface: string, ourNid: number, broadcastHeartbeat: boolean) =>
@@ -74,6 +74,17 @@ export const api = {
   imuGetState: () => invoke<ImuState>("imu_get_state"),
   imuBiasTrim: () => invoke<void>("imu_bias_trim"),
   imuYawReset: () => invoke<void>("imu_yaw_reset"),
+
+  // CAN Analyzer
+  analyzerStart: (spec: string) => invoke<void>("analyzer_start", { spec }),
+  analyzerStop: () => invoke<void>("analyzer_stop"),
+  analyzerGetTrace: (afterSeq: number, max: number, filter: CanFilterSpec) =>
+    invoke<CanTraceReply>("analyzer_get_trace", { afterSeq, max, filter }),
+  analyzerGetAggregates: (filter: CanFilterSpec) =>
+    invoke<CanAggReply>("analyzer_get_aggregates", { filter }),
+  analyzerGetStatus: () => invoke<CanAnalyzerStatus>("analyzer_get_status"),
+  analyzerClear: () => invoke<number>("analyzer_clear"),
+  analyzerSend: (spec: CanSendSpec) => invoke<void>("analyzer_send", { spec }),
 
   // Base(Zenoh)
   zenohConnect: (connect: string) => invoke<void>("zenoh_connect", { connect }),

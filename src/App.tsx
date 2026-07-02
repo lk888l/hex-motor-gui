@@ -13,10 +13,11 @@ import { Hopea3Panel } from "./components/Hopea3Panel";
 import { SmartKnobPanel } from "./components/SmartKnobPanel";
 import { ZenohPanel } from "./components/ZenohPanel";
 import { ArmPanel } from "./components/ArmPanel";
+import { CanAnalyzerPanel } from "./components/CanAnalyzerPanel";
 import { TutorialModal } from "./components/Tutorial";
 import type { MotorInfo } from "./types";
 
-type Tool = "control" | "changeId" | "zero" | "hopea3" | "smartknob" | "zenoh" | "arm";
+type Tool = "control" | "changeId" | "zero" | "hopea3" | "smartknob" | "zenoh" | "arm" | "canalyzer";
 
 const DEVICE_POLL_MS = 700;
 
@@ -115,11 +116,14 @@ export default function App() {
     : tool === "zenoh" ? t("toolBaseZenoh")
     : tool === "arm" ? "Arm (Zenoh)"
     : tool === "smartknob" ? t("toolSmartKnob")
+    : tool === "canalyzer" ? t("toolCanalyzer")
     : t("toolHopeA3");
   const needsHeartbeat = tool === "control" || tool === "hopea3" || tool === "smartknob";
-  // hopea3 / smartknob / zenoh / arm 都是整屏面板;zenoh/arm 走 Zenoh 不用 CAN 总线。
-  const showSidebar = tool !== "hopea3" && tool !== "smartknob" && tool !== "zenoh" && tool !== "arm";
-  const showConnectBar = tool !== "zenoh" && tool !== "arm";
+  // hopea3 / smartknob / zenoh / arm / canalyzer 都是整屏面板;zenoh/arm 走 Zenoh,
+  // canalyzer 自带总线连接,都不使用顶栏的电机 ConnectBar。
+  const showSidebar =
+    tool !== "hopea3" && tool !== "smartknob" && tool !== "zenoh" && tool !== "arm" && tool !== "canalyzer";
+  const showConnectBar = tool !== "zenoh" && tool !== "arm" && tool !== "canalyzer";
 
   return (
     <Layout style={{ height: "100vh" }}>
@@ -170,6 +174,8 @@ export default function App() {
             <ZenohPanel />
           ) : tool === "arm" ? (
             <ArmPanel />
+          ) : tool === "canalyzer" ? (
+            <CanAnalyzerPanel />
           ) : tool === "changeId" ? (
             <ChangeIdTool devices={devices} selectedNid={selectedNid} connected={connected} />
           ) : tool === "zero" ? (
@@ -237,6 +243,7 @@ function ToolPicker({ onPick }: { onPick: (t: Tool) => void }) {
           <ToolCard title={t("toolControl")} desc={t("toolControlDesc")} onClick={() => onPick("control")} />
           <ToolCard title={t("toolChangeId")} desc={t("toolChangeIdDesc")} onClick={() => onPick("changeId")} />
           <ToolCard title={t("toolZero")} desc={t("toolZeroDesc")} onClick={() => onPick("zero")} />
+          <ToolCard title={t("toolCanalyzer")} desc={t("toolCanalyzerDesc")} onClick={() => onPick("canalyzer")} />
         </Space>
 
         <Typography.Text strong style={{ display: "block", margin: "24px 0 8px" }}>

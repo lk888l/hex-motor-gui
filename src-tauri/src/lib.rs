@@ -3,6 +3,7 @@
 //! Wires the [`AppState`] into Tauri-managed state and registers every
 //! `#[tauri::command]` defined in [`commands`].
 
+mod analyzer;
 mod backend;
 mod commands;
 mod device_registry;
@@ -69,6 +70,13 @@ pub fn run() {
             commands::imu_get_state,
             commands::imu_bias_trim,
             commands::imu_yaw_reset,
+            commands::analyzer_start,
+            commands::analyzer_stop,
+            commands::analyzer_get_trace,
+            commands::analyzer_get_aggregates,
+            commands::analyzer_get_status,
+            commands::analyzer_clear,
+            commands::analyzer_send,
             commands::zenoh_connect,
             commands::zenoh_disconnect,
             commands::zenoh_discover,

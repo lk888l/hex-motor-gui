@@ -67,6 +67,11 @@ pub async fn disconnect(state: State<'_, AppState>) -> CmdResult<()> {
     if let Some(app) = state.imu.lock().await.take() {
         app.stop().await;
     }
+    // The analyzer owns its own bus, so stop it unconditionally (it may be the
+    // only thing running — the user never called the manager-based connect()).
+    if let Some(app) = state.analyzer.lock().await.take() {
+        app.stop().await;
+    }
     // Stop any running CSV recorders first so their files flush cleanly.
     for handle in state.drain_logs() {
         crate::logging::stop(handle).await;
@@ -508,6 +513,93 @@ pub async fn imu_yaw_reset(state: State<'_, AppState>) -> CmdResult<()> {
     let guard = state.imu.lock().await;
     let app = guard.as_ref().ok_or_else(|| "IMU not running".to_string())?;
     app.yaw_reset().await.map_err(err)
+}
+
+// ───────────────────────────── CAN Analyzer ─────────────────────────────
+
+/// Open `spec` (e.g. `"can0"`, `"gs_usb"`) as a fresh bus and start capturing
+/// all traffic. Independent of the motor `connect()` — the analyzer owns its bus.
+#[tauri::command]
+pub async fn analyzer_start(state: State<'_, AppState>, spec: String) -> CmdResult<()> {
+    let mut guard = state.analyzer.lock().await;
+    if guard.is_some() {
+        return Err("analyzer already running; stop it first".into());
+    }
+    let app = crate::analyzer::CanAnalyzer::start(&spec).await.map_err(err)?;
+    *guard = Some(app);
+    log::info!("CAN analyzer started on {spec:?}");
+    Ok(())
+}
+
+/// Stop capturing and release the analyzer's bus. No-op if not running.
+#[tauri::command]
+pub async fn analyzer_stop(state: State<'_, AppState>) -> CmdResult<()> {
+    if let Some(app) = state.analyzer.lock().await.take() {
+        app.stop().await;
+        log::info!("CAN analyzer stopped");
+    }
+    Ok(())
+}
+
+/// Poll a bounded trace slice: frames after `after_seq` (up to `max`) passing
+/// `filter`. Returns a `gap` flag when older frames were evicted.
+#[tauri::command]
+pub async fn analyzer_get_trace(
+    state: State<'_, AppState>,
+    after_seq: u64,
+    max: u32,
+    filter: crate::analyzer::FilterSpec,
+) -> CmdResult<crate::analyzer::TraceReplyDto> {
+    Ok(match state.analyzer.lock().await.as_ref() {
+        Some(app) => app.get_trace(after_seq, max, &filter),
+        None => crate::analyzer::TraceReplyDto::idle(),
+    })
+}
+
+/// Poll the per-ID aggregate table (for the "grouped by ID" view).
+#[tauri::command]
+pub async fn analyzer_get_aggregates(
+    state: State<'_, AppState>,
+    filter: crate::analyzer::FilterSpec,
+) -> CmdResult<crate::analyzer::AggReplyDto> {
+    Ok(match state.analyzer.lock().await.as_ref() {
+        Some(app) => app.get_aggregates(&filter),
+        None => crate::analyzer::AggReplyDto::idle(),
+    })
+}
+
+/// Poll analyzer status only (rate/drops/distinct ids/capabilities).
+#[tauri::command]
+pub async fn analyzer_get_status(
+    state: State<'_, AppState>,
+) -> CmdResult<crate::analyzer::AnalyzerStatusDto> {
+    Ok(match state.analyzer.lock().await.as_ref() {
+        Some(app) => app.get_status(),
+        None => crate::analyzer::AnalyzerStatusDto::idle(),
+    })
+}
+
+/// Empty the ring + aggregates + counters. Returns the cursor the frontend should
+/// adopt so post-clear frames aren't treated as a gap.
+#[tauri::command]
+pub async fn analyzer_clear(state: State<'_, AppState>) -> CmdResult<u64> {
+    Ok(match state.analyzer.lock().await.as_ref() {
+        Some(app) => app.clear(),
+        None => 0,
+    })
+}
+
+/// Manually transmit a frame (and show it locally as a `tx` row).
+#[tauri::command]
+pub async fn analyzer_send(
+    state: State<'_, AppState>,
+    spec: crate::analyzer::SendSpec,
+) -> CmdResult<()> {
+    let guard = state.analyzer.lock().await;
+    let app = guard
+        .as_ref()
+        .ok_or_else(|| "analyzer not running".to_string())?;
+    app.send(spec).await.map_err(err)
 }
 
 // ───────────────────────── Base(Zenoh) ─────────────────────────
