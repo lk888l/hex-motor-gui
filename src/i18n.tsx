@@ -186,6 +186,12 @@ const STRINGS = {
   toolChangeId: { en: "Change ID", zh: "改 ID" },
   toolZero: { en: "Set Zero", zh: "零点预设" },
   pickTool: { en: "Pick a tool", zh: "选择工具" },
+  toolPickerEyebrow: { en: "Tool launcher", zh: "工具启动器" },
+  toolPickerTitle: { en: "Pick a workspace", zh: "选择工作区" },
+  toolPickerLead: {
+    en: "Choose a motor-control workflow, a robot application, or a utility for setup and diagnostics.",
+    zh: "选择电机控制工作流、机器人应用，或用于配置与诊断的工具。",
+  },
   toolControlDesc: { en: "Discover, drive, chart & log motors.", zh: "发现、控制、绘图、记录电机。" },
   toolChangeIdDesc: {
     en: "Change a motor's Node-ID. No heartbeat is broadcast, so powering a motor off won't flood the bus.",
@@ -198,8 +204,22 @@ const STRINGS = {
   switchTool: { en: "Switch tool", zh: "切换工具" },
 
   // Tool categories + Robot Application
+  catMotorControl: { en: "Motor Control", zh: "电机控制" },
+  catMotorControlHint: { en: "Single-motor workflows", zh: "单电机工作流" },
+  catTools: { en: "Tools", zh: "工具" },
+  catToolsHint: { en: "Setup, calibration and bus inspection", zh: "配置、标定与总线检查" },
   catDirectControl: { en: "Direct Control", zh: "直接控制" },
   catRobotApp: { en: "Robot Application", zh: "机器人应用" },
+  catRobotAppHint: { en: "Base, arm and integrated demos", zh: "底盘、机械臂与综合演示" },
+  tagLiveControl: { en: "Live control", zh: "实时控制" },
+  tagHaptics: { en: "Haptics", zh: "力反馈" },
+  tagRobotApi: { en: "Robot API", zh: "Robot API" },
+  tagManipulator: { en: "Manipulator", zh: "机械臂" },
+  tagMobileBase: { en: "Mobile base", zh: "移动底盘" },
+  tagFactorySetup: { en: "Factory setup", zh: "工厂配置" },
+  tagCalibration: { en: "Calibration", zh: "标定" },
+  tagDebug: { en: "Debug", zh: "调试" },
+  tagQuickStart: { en: "Quick start", zh: "快速上手" },
   toolHopeA3: { en: "HopeA3(Raw Motor)", zh: "HopeA3(原始电机)" },
   toolHopeA3Desc: {
     en: "Triple-omni mobile base: 3 motors, 500 Hz max-torque PV control over one shared CAN-FD RPDO + live odometry.",
@@ -214,6 +234,11 @@ const STRINGS = {
   toolBaseZenohDesc: {
     en: "Connect to a hex-controller over Zenoh: auto-discover bases, take control, and drive — the productized robot_api path.",
     zh: "通过 Zenoh 连接 hex-controller：自动发现底盘、取得控制权、移动——产品化的 robot_api 路径。",
+  },
+  toolArmZenoh: { en: "Arm (Zenoh)", zh: "Arm (Zenoh)" },
+  toolArmZenohDesc: {
+    en: "Digital twin, gravity compensation, gravity setup and preset postures.",
+    zh: "机械臂数字孪生、重力补偿、设置重力与预设位姿。",
   },
   // Base(Zenoh) panel
   zEndpoint: { en: "Endpoint (optional)", zh: "地址(可选)" },
