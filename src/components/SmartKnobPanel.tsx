@@ -5,6 +5,7 @@ import {
   Card,
   Col,
   Empty,
+  Input,
   InputNumber,
   Row,
   Select,
@@ -51,13 +52,27 @@ export function SmartKnobPanel({ connected, devices }: { connected: boolean; dev
   const [pGain, setPGain] = useState(0.0);
   const [dGain, setDGain] = useState(0.0);
 
+  // Custom mode config editing (only meaningful for mode index 0).
+  const [customConfig, setCustomConfig] = useState<KnobConfig | null>(null);
+
   // Per-mode tuning RAM — survives mode switches so the user doesn't lose
   // their tweaks.  Lazy: only populated when the user touches a slider.
   const perModeTuning = useRef<Map<number, PerModeTuning>>(new Map());
 
   // Fetch the preset list once (it's static, connection-independent).
+  // Also seed the custom config placeholder from index 0.
   useEffect(() => {
-    api.smartknobConfigs().then(setConfigs).catch(() => {});
+    api.smartknobConfigs().then((cfgs) => {
+      setConfigs(cfgs);
+      if (cfgs.length > 0) {
+        setCustomConfig(cfgs[0]);
+        setStrength(cfgs[0].strength_scale);
+        setFrictionComp(cfgs[0].friction_compensation);
+        setClickTorque(cfgs[0].click_torque_nm);
+        setPGain(cfgs[0].p_gain);
+        setDGain(cfgs[0].d_gain);
+      }
+    }).catch(() => {});
   }, []);
 
   // Auto-select the first discovered motor.
@@ -72,7 +87,18 @@ export function SmartKnobPanel({ connected, devices }: { connected: boolean; dev
     const tick = async () => {
       try {
         const s = await api.smartknobGetState();
-        if (alive) setState(s);
+        if (alive) {
+          setState(s);
+          // Sync tuning values so config-driven changes (e.g. detent_strength →
+          // p_gain) propagate to the sliders.  strength_scale is excluded —
+          // the user controls it independently via the Tuning — Feel slider.
+          setPGain(s.p_gain);
+          setDGain(s.d_gain);
+          setTorqueLimit(s.torque_limit_nm);
+          setMaxTorque(s.max_torque_permille);
+          setFrictionComp(s.friction_compensation);
+          setClickTorque(s.click_torque_nm);
+        }
       } catch {
         /* transient */
       }
@@ -97,8 +123,36 @@ export function SmartKnobPanel({ connected, devices }: { connected: boolean; dev
     if (selectedNid == null) return;
     setStarting(true);
     try {
+      const saved = perModeTuning.current.get(modeIndex);
+      const cfg = configs[modeIndex];
+      const startPGain = saved?.pGain ?? cfg?.p_gain ?? pGain;
+      const startDGain = saved?.dGain ?? cfg?.d_gain ?? dGain;
+      const startStrength = saved?.strength ?? cfg?.strength_scale ?? strength;
+      const startFriction = saved?.frictionComp ?? cfg?.friction_compensation ?? frictionComp;
+      const startClick = saved?.clickTorque ?? cfg?.click_torque_nm ?? clickTorque;
+      const startTorqueLimit = saved?.torqueLimit ?? torqueLimit;
+      const startMaxTorque = saved?.maxTorque ?? maxTorque;
       await api.smartknobStart(selectedNid, modeIndex);
-      await api.smartknobSetTuning(pGain, dGain, strength, torqueLimit, maxTorque, frictionComp, clickTorque);
+      // If starting in custom mode, push the current custom config.
+      if (modeIndex === 0 && customConfig) {
+        await api.smartknobSetCustomConfig({
+          ...customConfig,
+          strength_scale: startStrength,
+          friction_compensation: startFriction,
+          click_torque_nm: startClick,
+          p_gain: startPGain,
+          d_gain: startDGain,
+        });
+      }
+      await api.smartknobSetTuning(
+        startPGain,
+        startDGain,
+        startStrength,
+        startTorqueLimit,
+        startMaxTorque,
+        startFriction,
+        startClick,
+      );
       setRunning(true);
       message.success(t("skRunning"));
     } catch (e) {
@@ -106,7 +160,7 @@ export function SmartKnobPanel({ connected, devices }: { connected: boolean; dev
     } finally {
       setStarting(false);
     }
-  }, [selectedNid, modeIndex, pGain, dGain, strength, torqueLimit, maxTorque, frictionComp, clickTorque, message, t]);
+  }, [selectedNid, modeIndex, configs, customConfig, pGain, dGain, strength, torqueLimit, maxTorque, frictionComp, clickTorque, message, t]);
 
   const stop = useCallback(async () => {
     try {
@@ -139,8 +193,8 @@ export function SmartKnobPanel({ connected, devices }: { connected: boolean; dev
         mt = maxTorque;
         fc = configs[idx]?.friction_compensation ?? 0;
         ct = configs[idx]?.click_torque_nm ?? 0;
-        pg = (configs[idx]?.detent_strength_unit ?? 0) * 4.0;
-        dg = computeDerivativeGain(configs[idx]);
+        pg = configs[idx]?.p_gain ?? 0;
+        dg = configs[idx]?.d_gain ?? 0;
       }
       setStrength(s);
       setTorqueLimit(tl);
@@ -149,12 +203,27 @@ export function SmartKnobPanel({ connected, devices }: { connected: boolean; dev
       setClickTorque(ct);
       setPGain(pg);
       setDGain(dg);
+      if (idx === 0 && customConfig) {
+        setCustomConfig({
+          ...customConfig,
+          strength_scale: s,
+          friction_compensation: fc,
+          click_torque_nm: ct,
+          p_gain: pg,
+          d_gain: dg,
+        });
+      }
       if (running) {
         api.smartknobSetConfig(idx).catch(() => {});
+        // When switching to custom mode, push the local custom config so the
+        // backend picks up any edits made while stopped.
+        if (idx === 0 && customConfig) {
+          api.smartknobSetCustomConfig(customConfig).catch(() => {});
+        }
         api.smartknobSetTuning(pg, dg, s, tl, mt, fc, ct).catch(() => {});
       }
     },
-    [running, configs, torqueLimit, maxTorque]
+    [running, configs, torqueLimit, maxTorque, customConfig]
   );
 
   const applyTuning = useCallback(
@@ -166,6 +235,16 @@ export function SmartKnobPanel({ connected, devices }: { connected: boolean; dev
       setClickTorque(ct);
       setPGain(pg);
       setDGain(dg);
+      if (modeIndex === 0) {
+        setCustomConfig((prev) => prev ? {
+          ...prev,
+          strength_scale: s,
+          friction_compensation: fc,
+          click_torque_nm: ct,
+          p_gain: pg,
+          d_gain: dg,
+        } : prev);
+      }
       // Persist into the per-mode RAM slot for the currently-active mode.
       perModeTuning.current.set(modeIndex, {
         strength: s, torqueLimit: tl, maxTorque: mt, frictionComp: fc,
@@ -174,6 +253,55 @@ export function SmartKnobPanel({ connected, devices }: { connected: boolean; dev
       if (running) api.smartknobSetTuning(pg, dg, s, tl, mt, fc, ct).catch(() => {});
     },
     [running, modeIndex]
+  );
+
+  // Custom mode config editor: merge updates into local state (immediate
+  // dial feedback) and push to the backend if running.
+  const applyCustomConfig = useCallback(
+    (updates: Partial<KnobConfig>) => {
+      setCustomConfig((prev) => {
+        if (!prev) return prev;
+        let next: KnobConfig = {
+          ...prev,
+          strength_scale: strength,
+          friction_compensation: frictionComp,
+          click_torque_nm: clickTorque,
+          p_gain: pGain,
+          d_gain: dGain,
+          ...updates,
+        };
+        if (shouldRefreshDefaultGains(updates)) {
+          next = withDefaultGains(next);
+          setPGain(next.p_gain);
+          setDGain(next.d_gain);
+          perModeTuning.current.set(modeIndex, {
+            strength,
+            torqueLimit,
+            maxTorque,
+            frictionComp,
+            clickTorque: next.click_torque_nm,
+            pGain: next.p_gain,
+            dGain: next.d_gain,
+          });
+          if (running) {
+            api.smartknobSetTuning(
+              next.p_gain,
+              next.d_gain,
+              strength,
+              torqueLimit,
+              maxTorque,
+              frictionComp,
+              next.click_torque_nm,
+            ).catch(() => {});
+          }
+        }
+        if (running) {
+          api.smartknobSetCustomConfig(next).catch(() => {});
+        }
+        return next;
+      });
+    },
+    [running, modeIndex, strength, torqueLimit, maxTorque, frictionComp, clickTorque, pGain, dGain],
   );
 
   const clearError = useCallback(async () => {
@@ -194,7 +322,12 @@ export function SmartKnobPanel({ connected, devices }: { connected: boolean; dev
   }
 
   const activeIndex = running ? state?.config_index ?? modeIndex : modeIndex;
-  const activeConfig = state?.config ?? configs[activeIndex] ?? null;
+  // Use local customConfig for immediate dial feedback when in custom mode;
+  // otherwise prefer the backend's live config, falling back to presets.
+  const activeConfig =
+    (activeIndex === 0 && customConfig)
+      ? customConfig
+      : (state?.config ?? configs[activeIndex] ?? null);
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
@@ -239,6 +372,110 @@ export function SmartKnobPanel({ connected, devices }: { connected: boolean; dev
         <Col xs={24} lg={11}>
           <Card>
             <Dial config={activeConfig} state={state} />
+          </Card>
+
+          {/* Mode config params — editable for custom mode, locked for presets. */}
+          <Card title={t("skModeConfig")} size="small" style={{ marginTop: 16 }}>
+            {activeIndex !== 0 && (
+              <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 8 }}>
+                {t("skCustomLocked")}
+              </Typography.Text>
+            )}
+            <Space direction="vertical" style={{ width: "100%" }} size={8}>
+              <Row gutter={8}>
+                <Col span={24}>
+                  <Labeled label={t("skCustomName")}>
+                    <Input
+                      disabled={activeIndex !== 0}
+                      value={activeConfig?.text ?? ""}
+                      onChange={(e) => applyCustomConfig({ text: e.target.value })}
+                      placeholder={t("skCustomName")}
+                    />
+                  </Labeled>
+                </Col>
+              </Row>
+              <Row gutter={8}>
+                <Col span={12}>
+                  <Labeled label={t("skLedHue")}>
+                    <InputNumber
+                      disabled={activeIndex !== 0}
+                      min={0} max={255} step={1}
+                      value={activeConfig?.led_hue ?? 120}
+                      onChange={(v) => applyCustomConfig({ led_hue: v ?? 120 })}
+                      style={{ width: "100%" }}
+                    />
+                  </Labeled>
+                </Col>
+                <Col span={12}>
+                  <Labeled label={t("skSnapPoint")}>
+                    <InputNumber
+                      disabled={activeIndex !== 0}
+                      min={0.5} max={1.1} step={0.01}
+                      value={activeConfig?.snap_point ?? 0.55}
+                      onChange={(v) => applyCustomConfig({ snap_point: v ?? 0.55 })}
+                      style={{ width: "100%" }}
+                    />
+                  </Labeled>
+                </Col>
+              </Row>
+              <Row gutter={8}>
+                <Col span={8}>
+                  <Labeled label={t("skMinPos")}>
+                    <InputNumber
+                      disabled={activeIndex !== 0}
+                      value={activeConfig?.min_position ?? 0}
+                      onChange={(v) => applyCustomConfig({ min_position: v ?? 0 })}
+                      style={{ width: "100%" }}
+                    />
+                  </Labeled>
+                </Col>
+                <Col span={8}>
+                  <Labeled label={t("skMaxPos")}>
+                    <InputNumber
+                      disabled={activeIndex !== 0}
+                      value={activeConfig?.max_position ?? -1}
+                      onChange={(v) => applyCustomConfig({ max_position: v ?? -1 })}
+                      style={{ width: "100%" }}
+                    />
+                  </Labeled>
+                </Col>
+                <Col span={8}>
+                  <Labeled label={t("skPosWidth")}>
+                    <InputNumber
+                      disabled={activeIndex !== 0}
+                      min={0.5} step={1}
+                      value={Math.round(radToDeg(activeConfig?.position_width_radians ?? 0.1745) * 10) / 10}
+                      onChange={(v) => applyCustomConfig({ position_width_radians: degToRad(v ?? 10) })}
+                      style={{ width: "100%" }}
+                    />
+                  </Labeled>
+                </Col>
+              </Row>
+              <Row gutter={8}>
+                <Col span={8}>
+                  <Labeled label={t("skDetentStrength")}>
+                    <InputNumber
+                      disabled={activeIndex !== 0}
+                      min={0} step={0.1}
+                      value={activeConfig?.detent_strength_unit ?? 0}
+                      onChange={(v) => applyCustomConfig({ detent_strength_unit: v ?? 0 })}
+                      style={{ width: "100%" }}
+                    />
+                  </Labeled>
+                </Col>
+                <Col span={8}>
+                  <Labeled label={t("skEndstopStrength")}>
+                    <InputNumber
+                      disabled={activeIndex !== 0}
+                      min={0} step={0.1}
+                      value={activeConfig?.endstop_strength_unit ?? 1}
+                      onChange={(v) => applyCustomConfig({ endstop_strength_unit: v ?? 1 })}
+                      style={{ width: "100%" }}
+                    />
+                  </Labeled>
+                </Col>
+              </Row>
+            </Space>
           </Card>
         </Col>
         <Col xs={24} lg={13}>
@@ -507,26 +744,6 @@ function ModeButton({ cfg, active, onClick }: { cfg: KnobConfig; active: boolean
   );
 }
 
-// ─── Client-side replica of Rust derivative_gain() for seeding on first mode visit ───
-
-const DEG = Math.PI / 180;
-const CLICK_WIDTH_THRESHOLD_RAD = 3 * DEG;
-
-function computeDerivativeGain(cfg: KnobConfig | undefined): number {
-  if (!cfg) return 0;
-  if (cfg.detent_positions.length > 0) return 0;           // magnetic detents: no D
-  if (cfg.click_torque_nm > 0 || cfg.position_width_radians < CLICK_WIDTH_THRESHOLD_RAD) return 0; // clicks replace D
-
-  const lower = cfg.detent_strength_unit * 0.08;            // at 3°
-  const upper = cfg.detent_strength_unit * 0.02;            // at 8°
-  const w_lower = 3 * DEG;
-  const w_upper = 8 * DEG;
-  const raw = lower + (upper - lower) / (w_upper - w_lower) * (cfg.position_width_radians - w_lower);
-  const lo = Math.min(lower, upper);
-  const hi = Math.max(lower, upper);
-  return Math.max(lo, Math.min(hi, raw));
-}
-
 function Labeled({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
@@ -542,6 +759,42 @@ function Labeled({ label, children }: { label: string; children: React.ReactNode
 
 // ─────────────────────────────── helpers ────────────────────────────────────
 
+const DEG = Math.PI / 180;
+const CLICK_WIDTH_THRESHOLD_RAD = 3 * DEG;
+
+function shouldRefreshDefaultGains(updates: Partial<KnobConfig>): boolean {
+  return (
+    updates.detent_strength_unit !== undefined ||
+    updates.position_width_radians !== undefined ||
+    updates.detent_positions !== undefined ||
+    updates.click_torque_nm !== undefined
+  );
+}
+
+function withDefaultGains(cfg: KnobConfig): KnobConfig {
+  return {
+    ...cfg,
+    p_gain: defaultPGain(cfg),
+    d_gain: defaultDGain(cfg),
+  };
+}
+
+function defaultPGain(cfg: KnobConfig): number {
+  return cfg.detent_strength_unit * 4.0;
+}
+
+function defaultDGain(cfg: KnobConfig): number {
+  if (cfg.detent_positions.length > 0) return 0;
+  if (cfg.click_torque_nm > 0 || cfg.position_width_radians < CLICK_WIDTH_THRESHOLD_RAD) return 0;
+
+  const lower = cfg.detent_strength_unit * 0.08;
+  const upper = cfg.detent_strength_unit * 0.02;
+  const wLower = 3 * DEG;
+  const wUpper = 8 * DEG;
+  const raw = lower + ((upper - lower) / (wUpper - wLower)) * (cfg.position_width_radians - wLower);
+  return clamp(raw, Math.min(lower, upper), Math.max(lower, upper));
+}
+
 /** End coordinates of a line from center at `deg` (0°=+x, CW) and radius. */
 function lineEnd(deg: number, radius: number): { x2: number; y2: number } {
   const rad = (deg * Math.PI) / 180;
@@ -555,6 +808,14 @@ function positionCount(c: KnobConfig): number {
 function degOf(rad: number | null | undefined): number {
   if (rad == null) return 0;
   return (rad * 180) / Math.PI;
+}
+
+function radToDeg(rad: number): number {
+  return (rad * 180) / Math.PI;
+}
+
+function degToRad(deg: number): number {
+  return (deg * Math.PI) / 180;
 }
 
 function clamp(x: number, lo: number, hi: number): number {

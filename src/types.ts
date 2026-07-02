@@ -120,11 +120,13 @@ export interface KnobConfig {
   snap_point_bias: number;
   detent_positions: number[];
   click_torque_nm: number;
-  zero_g: boolean;
   friction_compensation: number;
   strength_scale: number;
+  p_gain: number;
+  d_gain: number;
   text: string;
   led_hue: number;
+  is_custom: boolean;
 }
 
 export interface SmartKnobState {

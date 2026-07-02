@@ -421,8 +421,8 @@ pub async fn smartknob_set_config(state: State<'_, AppState>, index: usize) -> C
 /// Update live haptic tunables: P-gain and D-gain (firmware PID units),
 /// overall strength scale (Nm/unit), host torque clamp (Nm), motor-side
 /// max-torque safety clamp (‰ of peak), Coulomb friction compensation (Nm)
-/// for non-Zero-G modes, and click torque (Nm) for modes with
-/// `use_click = true`.
+/// Coulomb friction compensation (Nm) and click torque (Nm) for modes with
+/// `click_torque_nm > 0`.
 #[tauri::command]
 pub async fn smartknob_set_tuning(
     state: State<'_, AppState>,
@@ -455,6 +455,54 @@ pub async fn smartknob_clear_error(state: State<'_, AppState>) -> CmdResult<()> 
     let nid = state.smartknob.lock().await.as_ref().map(|a| a.node_id());
     if let Some(nid) = nid {
         crate::smartknob::clear_error(&mgr, nid).await;
+    }
+    Ok(())
+}
+
+/// Update the custom mode's KnobConfig (index 0).  The haptic loop
+/// re-applies it on the next tick without recentering the detent.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn smartknob_set_custom_config(
+    state: State<'_, AppState>,
+    position: i32,
+    min_position: i32,
+    max_position: i32,
+    position_width_radians: f64,
+    detent_strength_unit: f64,
+    endstop_strength_unit: f64,
+    snap_point: f64,
+    snap_point_bias: f64,
+    detent_positions: Vec<i32>,
+    click_torque_nm: f64,
+    friction_compensation: f64,
+    strength_scale: f64,
+    p_gain: f64,
+    d_gain: f64,
+    text: String,
+    led_hue: i32,
+) -> CmdResult<()> {
+    let config = crate::smartknob::KnobConfig {
+        position,
+        min_position,
+        max_position,
+        position_width_radians,
+        detent_strength_unit,
+        endstop_strength_unit,
+        snap_point,
+        snap_point_bias,
+        detent_positions,
+        click_torque_nm,
+        friction_compensation,
+        strength_scale,
+        p_gain,
+        d_gain,
+        text,
+        led_hue,
+        is_custom: true,
+    };
+    if let Some(app) = state.smartknob.lock().await.as_ref() {
+        app.set_custom_config(config);
     }
     Ok(())
 }

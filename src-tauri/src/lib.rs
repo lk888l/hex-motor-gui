@@ -62,6 +62,7 @@ pub fn run() {
             commands::smartknob_set_tuning,
             commands::smartknob_clear_error,
             commands::smartknob_get_state,
+            commands::smartknob_set_custom_config,
             commands::zenoh_connect,
             commands::zenoh_disconnect,
             commands::zenoh_discover,

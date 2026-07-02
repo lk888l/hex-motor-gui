@@ -83,6 +83,25 @@ export const api = {
     }),
   smartknobClearError: () => invoke<void>("smartknob_clear_error"),
   smartknobGetState: () => invoke<SmartKnobState>("smartknob_get_state"),
+  smartknobSetCustomConfig: (cfg: KnobConfig) =>
+    invoke<void>("smartknob_set_custom_config", {
+      position: cfg.position,
+      minPosition: cfg.min_position,
+      maxPosition: cfg.max_position,
+      positionWidthRadians: cfg.position_width_radians,
+      detentStrengthUnit: cfg.detent_strength_unit,
+      endstopStrengthUnit: cfg.endstop_strength_unit,
+      snapPoint: cfg.snap_point,
+      snapPointBias: cfg.snap_point_bias,
+      detentPositions: cfg.detent_positions,
+      clickTorqueNm: cfg.click_torque_nm,
+      frictionCompensation: cfg.friction_compensation,
+      strengthScale: cfg.strength_scale,
+      pGain: cfg.p_gain,
+      dGain: cfg.d_gain,
+      text: cfg.text,
+      ledHue: cfg.led_hue,
+    }),
 
   // Base(Zenoh)
   zenohConnect: (connect: string) => invoke<void>("zenoh_connect", { connect }),

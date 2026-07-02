@@ -193,6 +193,18 @@ const STRINGS = {
   skDGain: { en: "D-gain", zh: "D 增益" },
   skTuningFeel: { en: "Tuning — Feel", zh: "调参 — 手感" },
   skTuningSafety: { en: "Tuning — Safety", zh: "调参 — 安全" },
+  skModeConfig: { en: "Mode config", zh: "模式配置" },
+  skCustomConfig: { en: "Custom mode config", zh: "自定义模式配置" },
+  skCustomLocked: { en: "Config locked for preset modes", zh: "预设模式配置已锁定" },
+  skCustomName: { en: "Mode name", zh: "模式名称" },
+  skLedHue: { en: "LED hue (0-255)", zh: "LED 色相 (0-255)" },
+  skMinPos: { en: "Min position", zh: "最小位置" },
+  skMaxPos: { en: "Max position", zh: "最大位置" },
+  skPosWidth: { en: "Position width (°)", zh: "位置宽度 (度)" },
+  skDetentStrength: { en: "Detent strength", zh: "卡位强度" },
+  skEndstopStrength: { en: "Endstop strength", zh: "限位强度" },
+  skSnapPoint: { en: "Snap point", zh: "吸附点" },
+
 
   // HopeA3 panel
   hopeStart: { en: "Start", zh: "启动" },
