@@ -1,17 +1,15 @@
 // Polling hook for the CAN analyzer (mirrors useImuTelemetry's decoupling).
 //
-// A fast POLL timer drains bounded batches from the backend into refs; a slower
-// RENDER timer bumps a version counter to trigger a re-render. Nothing renders
-// per frame. Trace mode uses a seq cursor (so each poll only pulls *new* frames);
-// grouped mode pulls the whole small per-ID table. Freeze pauses rendering but
-// keeps draining so drop/gap accounting stays honest.
+// A frontend refresh timer drains bounded batches from the backend into refs;
+// a matching render timer bumps a version counter to trigger a re-render.
+// Nothing renders per frame. Trace mode uses a seq cursor (so each poll only
+// pulls *new* frames); grouped mode pulls the whole small per-ID table. Freeze
+// pauses rendering but keeps draining so drop/gap accounting stays honest.
 
 import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import type { CanAggRow, CanAnalyzerStatus, CanBusHealth, CanFilterSpec, CanTraceFrame } from "./types";
 
-const POLL_MS = 50; // 20 Hz backend drain
-const RENDER_MS = 100; // 10 Hz UI tick
 const HEALTH_MS = 1000; // 1 Hz controller-health poll (netlink / USB control)
 const MAX_ROWS = 3000; // client trace buffer cap
 const MAX_BATCH = 2000; // frames requested per poll
@@ -51,6 +49,7 @@ export function useCanTrace(
   mode: CanMode,
   filter: CanFilterSpec,
   paused: boolean,
+  refreshHz: number,
 ): CanTraceState {
   const bufRef = useRef<CanTraceFrame[]>([]);
   const groupedRef = useRef<CanAggRow[]>([]);
@@ -65,6 +64,7 @@ export function useCanTrace(
   const pausedRef = useRef(paused);
   const prevTotalRef = useRef(0);
   const [version, setVersion] = useState(0);
+  const refreshMs = Math.max(1, Math.round(1000 / Math.max(1, refreshHz)));
 
   pausedRef.current = paused;
   const filterKey = JSON.stringify(filter);
@@ -92,7 +92,8 @@ export function useCanTrace(
     setVersion((v) => v + 1);
   };
 
-  // Re-arm polling whenever the session, mode, or filter changes.
+  // Reset local buffers only when the session, mode, or filter changes. Changing
+  // the refresh rate should not wipe the user's current trace view.
   useEffect(() => {
     if (!running) {
       resetLocal();
@@ -102,6 +103,12 @@ export function useCanTrace(
     }
     // Filter/mode changed → re-pull from the ring start with the new predicate.
     resetLocal();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [running, mode, filterKey]);
+
+  // Re-arm frontend polling/rendering whenever the refresh rate changes.
+  useEffect(() => {
+    if (!running) return;
     let alive = true;
     let firstPoll = true;
 
@@ -148,11 +155,23 @@ export function useCanTrace(
       } catch {
         /* transient (e.g. just stopped) — ignore */
       }
-    }, POLL_MS);
+    }, refreshMs);
 
     const tick = window.setInterval(() => {
       if (alive && !pausedRef.current) setVersion((v) => v + 1);
-    }, RENDER_MS);
+    }, refreshMs);
+
+    return () => {
+      alive = false;
+      window.clearInterval(poll);
+      window.clearInterval(tick);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [running, mode, filterKey, refreshMs]);
+
+  useEffect(() => {
+    if (!running) return;
+    let alive = true;
 
     let healthFails = 0;
     const health = window.setInterval(async () => {
@@ -171,12 +190,9 @@ export function useCanTrace(
 
     return () => {
       alive = false;
-      window.clearInterval(poll);
-      window.clearInterval(tick);
       window.clearInterval(health);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [running, mode, filterKey]);
+  }, [running]);
 
   return { bufRef, groupedRef, statusRef, rateRef, gapRef, evictedRef, lastActivityRef, healthRef, version, clear };
 }

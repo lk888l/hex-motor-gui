@@ -58,6 +58,10 @@ const STRINGS = {
   canModeTrace: { en: "Trace", zh: "逐帧" },
   canModeGrouped: { en: "Grouped by ID", zh: "按 ID 汇总" },
   canInterpret: { en: "CANopen decode", zh: "CANopen 解析" },
+  canRefreshHint: {
+    en: "Frontend drain and render refresh. Higher rates look smoother but cost more CPU.",
+    zh: "前端 drain 与渲染刷新率。高档更顺滑，但会占用更多 CPU。",
+  },
   canFilterAll: { en: "No filter", zh: "不过滤" },
   canFilterNode: { en: "By node", zh: "按节点" },
   canFilterMask: { en: "By id+mask", zh: "按 id+掩码" },

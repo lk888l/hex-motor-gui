@@ -14,10 +14,8 @@ import {
   Button,
   Card,
   Checkbox,
-  Col,
   Input,
   InputNumber,
-  Row,
   Segmented,
   Select,
   Space,
@@ -31,15 +29,33 @@ import {
 } from "antd";
 import { api, errMsg } from "../api";
 import { nid2hex, parseNid } from "../format";
-import { useI18n } from "../i18n";
+import { useI18n, type I18nKey } from "../i18n";
 import { decodeCanopen, kindColor } from "../canopen";
 import { useCanTrace, ACTIVE_WINDOW_MS, type CanMode } from "../useCanTrace";
 import type { CanAggRow, CanFilterSpec, CanSendSpec, CanTraceFrame } from "../types";
+import "./CanAnalyzerPanel.css";
 
 const ROW_H = 22;
 const VIEW_H = 440;
 
 type FilterType = "all" | "node" | "mask";
+type TraceColumnKey = "seq" | "time" | "dir" | "id" | "decode" | "dlc" | "data";
+type TraceColumnWidths = Record<TraceColumnKey, number>;
+
+const TRACE_COLUMNS: Array<{ key: TraceColumnKey; labelKey: I18nKey; min: number; defaultWidth: number }> = [
+  { key: "seq", labelKey: "canColSeq", min: 56, defaultWidth: 70 },
+  { key: "time", labelKey: "canColTime", min: 86, defaultWidth: 112 },
+  { key: "dir", labelKey: "canColDir", min: 48, defaultWidth: 56 },
+  { key: "id", labelKey: "canColId", min: 120, defaultWidth: 156 },
+  { key: "decode", labelKey: "canColKind", min: 140, defaultWidth: 190 },
+  { key: "dlc", labelKey: "canColDlc", min: 48, defaultWidth: 56 },
+  { key: "data", labelKey: "canColData", min: 220, defaultWidth: 420 },
+];
+
+const DEFAULT_TRACE_WIDTHS = TRACE_COLUMNS.reduce((m, c) => {
+  m[c.key] = c.defaultWidth;
+  return m;
+}, {} as TraceColumnWidths);
 
 // SocketCAN (can0) only exists on Linux; elsewhere the gs_usb/candleLight
 // userspace backend is the default. gs_usb0 = first adapter, channel 0.
@@ -88,6 +104,7 @@ export function CanAnalyzerPanel() {
   const [mode, setMode] = useState<CanMode>("trace");
   const [interpret, setInterpret] = useState(true);
   const [paused, setPaused] = useState(false);
+  const [refreshHz, setRefreshHz] = useState(60);
 
   const [filterType, setFilterType] = useState<FilterType>("all");
   const [node, setNode] = useState(1);
@@ -114,7 +131,7 @@ export function CanAnalyzerPanel() {
   }, [filterType, node, includeNodeless, maskIdStr, maskStr, maskExt]);
 
   const { bufRef, groupedRef, statusRef, rateRef, gapRef, evictedRef, lastActivityRef, healthRef, version, clear } =
-    useCanTrace(running, mode, filter, paused);
+    useCanTrace(running, mode, filter, paused, refreshHz);
 
   // Stop capture on unmount (tool switch also calls disconnect() as a safety net).
   useEffect(() => {
@@ -195,8 +212,8 @@ export function CanAnalyzerPanel() {
         health={healthRef.current}
       />
 
-      <Row gutter={12}>
-        <Col flex="auto">
+      <div className="can-analyzer-workspace">
+        <div className="can-analyzer-main">
           {/* controls */}
           <Card size="small" style={{ marginBottom: 12 }}>
             <Space wrap size={12}>
@@ -211,6 +228,21 @@ export function CanAnalyzerPanel() {
               <Space size={4}>
                 <Switch checked={interpret} onChange={setInterpret} size="small" />
                 <Typography.Text>{t("canInterpret")}</Typography.Text>
+              </Space>
+              <Space size={4}>
+                <Typography.Text type="secondary">{t("refresh")}</Typography.Text>
+                <Tooltip title={t("canRefreshHint")}>
+                  <Segmented
+                    size="small"
+                    value={refreshHz}
+                    onChange={(v) => setRefreshHz(v as number)}
+                    options={[
+                      { label: "30 Hz", value: 30 },
+                      { label: "60 Hz", value: 60 },
+                      { label: "90 Hz", value: 90 },
+                    ]}
+                  />
+                </Tooltip>
               </Space>
               <Select<FilterType>
                 value={filterType}
@@ -294,10 +326,10 @@ export function CanAnalyzerPanel() {
           ) : (
             <GroupedTable rows={groupedRef.current} interpret={interpret} />
           )}
-        </Col>
+        </div>
 
         {/* manual send / SDO client — 二选一 */}
-        <Col flex="340px">
+        <aside className="can-analyzer-side">
           <Card size="small" styles={{ body: { paddingTop: 0 } }}>
             <Tabs
               size="small"
@@ -317,8 +349,8 @@ export function CanAnalyzerPanel() {
               ]}
             />
           </Card>
-        </Col>
-      </Row>
+        </aside>
+      </div>
     </Space>
   );
 }
@@ -364,9 +396,9 @@ function StatusStrip({
   void aggOverflow;
   const stateKey = health?.supported && health.state ? health.state : null;
   return (
-    <Card size="small">
-      <Space wrap size={24}>
-        <Space size={6}>
+    <Card size="small" className="can-status-card">
+      <div className="can-status-strip">
+        <Space size={6} wrap className="can-status-badges">
           <Tag color={running ? (active ? "green" : "default") : "red"}>
             {running ? (active ? t("canActive") : t("canIdle")) : t("canStopped")}
           </Tag>
@@ -393,10 +425,27 @@ function StatusStrip({
             </Tooltip>
           )}
         </Space>
-        <Statistic title={t("canRxRate")} value={running ? Math.round(rate) : 0} suffix="fps" valueStyle={{ fontSize: 18 }} />
-        <Statistic title={t("canTotal")} value={total} valueStyle={{ fontSize: 18 }} />
-        <Statistic title={t("canDistinct")} value={distinct} valueStyle={{ fontSize: 18 }} />
         <Statistic
+          className="can-status-stat can-status-stat--rate"
+          title={t("canRxRate")}
+          value={running ? Math.round(rate) : 0}
+          suffix="fps"
+          valueStyle={{ fontSize: 18 }}
+        />
+        <Statistic
+          className="can-status-stat can-status-stat--frames"
+          title={t("canTotal")}
+          value={total}
+          valueStyle={{ fontSize: 18 }}
+        />
+        <Statistic
+          className="can-status-stat can-status-stat--ids"
+          title={t("canDistinct")}
+          value={distinct}
+          valueStyle={{ fontSize: 18 }}
+        />
+        <Statistic
+          className="can-status-stat can-status-stat--drops"
           title={
             <Tooltip title={t("canGuiDropsHint")}>
               <span>{t("canGuiDrops")} ⓘ</span>
@@ -406,6 +455,7 @@ function StatusStrip({
           valueStyle={{ fontSize: 18, color: guiDrops > 0 ? "#faad14" : undefined }}
         />
         <Statistic
+          className="can-status-stat can-status-stat--errors"
           title={
             <Tooltip title={t("canErrHint")}>
               <span>{t("canErrCounters")} ⓘ</span>
@@ -422,7 +472,7 @@ function StatusStrip({
               (health?.tx_errors ?? 0) > 0 || (health?.rx_errors ?? 0) > 0 ? "#faad14" : undefined,
           }}
         />
-      </Space>
+      </div>
     </Card>
   );
 }
@@ -445,7 +495,10 @@ function TraceList({
   const atBottomRef = useRef(true);
   const lastEvictedRef = useRef(0);
   const [scrollTop, setScrollTop] = useState(0);
+  const [widths, setWidths] = useState<TraceColumnWidths>(DEFAULT_TRACE_WIDTHS);
   const total = frames.length;
+  const gridTemplate = TRACE_COLUMNS.map((c) => `${widths[c.key]}px`).join(" ");
+  const tableWidth = TRACE_COLUMNS.reduce((sum, c) => sum + widths[c.key], 0);
 
   // Each tick: pin to bottom if the user is there, otherwise compensate for
   // rows evicted from the front so the frames under inspection stay put.
@@ -476,64 +529,116 @@ function TraceList({
   const visible = frames.slice(start, end);
   void version;
 
+  const startResize = (key: TraceColumnKey, min: number, startX: number) => {
+    const startWidth = widths[key];
+    const onMove = (ev: PointerEvent) => {
+      const next = Math.max(min, startWidth + ev.clientX - startX);
+      setWidths((cur) => ({ ...cur, [key]: next }));
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.classList.remove("can-resizing-column");
+    };
+    document.body.classList.add("can-resizing-column");
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
   return (
     <Card size="small" styles={{ body: { padding: 0 } }}>
-      <div style={{ display: "flex", padding: "4px 10px", borderBottom: "1px solid #303030", fontSize: 12, color: "#888", fontFamily: "monospace" }}>
-        <span style={{ width: 64 }}>{t("canColSeq")}</span>
-        <span style={{ width: 84 }}>{t("canColTime")}</span>
-        <Tooltip title={t("canDirHint")}>
-          <span style={{ width: 34, cursor: "help", textDecoration: "underline dotted" }}>
-            {t("canColDir")}
-          </span>
-        </Tooltip>
-        <span style={{ width: 130 }}>{t("canColId")}</span>
-        <span style={{ width: 88 }}>{t("canColKind")}</span>
-        <span style={{ width: 34 }}>{t("canColDlc")}</span>
-        <span style={{ flex: 1 }}>{t("canColData")}</span>
-      </div>
-      <div ref={scrollRef} onScroll={onScroll} style={{ height: VIEW_H, overflow: "auto", fontFamily: "monospace", fontSize: 12.5 }}>
-        <div style={{ height: total * ROW_H, position: "relative" }}>
+      <div className="can-trace-shell">
+        <div className="can-trace-table" style={{ width: tableWidth }}>
+          <div className="can-trace-header" style={{ gridTemplateColumns: gridTemplate }}>
+            {TRACE_COLUMNS.map((col) => {
+              const label = t(col.labelKey);
+              const content =
+                col.key === "dir" ? (
+                  <Tooltip title={t("canDirHint")}>
+                    <span className="can-trace-header__hint">{label}</span>
+                  </Tooltip>
+                ) : (
+                  label
+                );
+              return (
+                <div className="can-trace-header__cell" key={col.key}>
+                  <span className="can-trace-header__label">{content}</span>
+                  <span
+                    className="can-trace-resizer"
+                    role="separator"
+                    aria-orientation="vertical"
+                    tabIndex={0}
+                    title="Drag to resize"
+                    onDoubleClick={() => setWidths((cur) => ({ ...cur, [col.key]: col.defaultWidth }))}
+                    onPointerDown={(ev) => {
+                      ev.preventDefault();
+                      startResize(col.key, col.min, ev.clientX);
+                    }}
+                  />
+                </div>
+              );
+            })}
+          </div>
+          <div
+            ref={scrollRef}
+            onScroll={onScroll}
+            className="can-trace-body"
+            style={{ height: VIEW_H }}
+          >
+            <div className="can-trace-virtual" style={{ height: total * ROW_H }}>
           {visible.map((f, i) => (
-            <TraceRow key={f.seq} f={f} interpret={interpret} top={(start + i) * ROW_H} />
+            <TraceRow
+              key={f.seq}
+              f={f}
+              interpret={interpret}
+              top={(start + i) * ROW_H}
+              gridTemplate={gridTemplate}
+            />
           ))}
+            </div>
+          </div>
         </div>
       </div>
     </Card>
   );
 }
 
-function TraceRow({ f, interpret, top }: { f: CanTraceFrame; interpret: boolean; top: number }) {
+function TraceRow({
+  f,
+  interpret,
+  top,
+  gridTemplate,
+}: {
+  f: CanTraceFrame;
+  interpret: boolean;
+  top: number;
+  gridTemplate: string;
+}) {
   const dec = interpret ? decodeCanopen(f.id, f.extended, hexToBytes(f.data)) : null;
+  const idText = idHex(f.id, f.extended);
+  const decodeText = dec?.detail ?? f.kind;
   return (
     <div
-      style={{
-        position: "absolute",
-        top,
-        height: ROW_H,
-        left: 0,
-        right: 0,
-        display: "flex",
-        alignItems: "center",
-        padding: "0 10px",
-        whiteSpace: "nowrap",
-        background: f.dir === "tx" ? "rgba(79,140,255,0.10)" : undefined,
-      }}
+      className={`can-trace-row${f.dir === "tx" ? " can-trace-row--tx" : ""}`}
+      style={{ top, height: ROW_H, gridTemplateColumns: gridTemplate }}
     >
-      <span style={{ width: 64, color: "#666" }}>{f.seq}</span>
-      <span style={{ width: 84, color: "#999" }}>{(f.t_us / 1000).toFixed(1)}</span>
-      <span style={{ width: 34 }}>
+      <span className="can-trace-cell can-trace-cell--muted" title={String(f.seq)}>{f.seq}</span>
+      <span className="can-trace-cell can-trace-cell--muted" title={(f.t_us / 1000).toFixed(1)}>
+        {(f.t_us / 1000).toFixed(1)}
+      </span>
+      <span className="can-trace-cell">
         {f.dir === "tx" ? <Tag color="blue" style={{ marginInlineEnd: 0 }}>TX</Tag> : <span style={{ color: "#555" }}>rx</span>}
       </span>
-      <span style={{ width: 130 }}>
+      <span className="can-trace-cell" title={dec ? dec.label : idText}>
         {dec ? (
           <Tag color={kindColor(dec.kind)} style={{ marginInlineEnd: 0 }}>{dec.label}</Tag>
         ) : (
-          <span>{idHex(f.id, f.extended)}</span>
+          <span>{idText}</span>
         )}
       </span>
-      <span style={{ width: 88, color: "#aaa" }}>{dec?.detail ?? f.kind}</span>
-      <span style={{ width: 34, color: "#999" }}>{f.dlc}</span>
-      <span style={{ flex: 1, color: "#ddd" }}>{f.data}</span>
+      <span className="can-trace-cell can-trace-cell--decode" title={decodeText}>{decodeText}</span>
+      <span className="can-trace-cell can-trace-cell--muted" title={String(f.dlc)}>{f.dlc}</span>
+      <span className="can-trace-cell can-trace-cell--data" title={f.data}>{f.data}</span>
     </div>
   );
 }
@@ -591,7 +696,7 @@ function GroupedTable({ rows, interpret }: { rows: CanAggRow[]; interpret: boole
       columns={columns}
       dataSource={rows}
       pagination={false}
-      scroll={{ y: VIEW_H }}
+      scroll={{ x: 760, y: VIEW_H }}
     />
   );
 }

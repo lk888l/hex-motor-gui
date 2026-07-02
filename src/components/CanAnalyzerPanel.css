@@ -1,0 +1,215 @@
+.can-analyzer-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 380px);
+  gap: 12px;
+  align-items: start;
+}
+
+.can-analyzer-main {
+  min-width: 0;
+}
+
+.can-analyzer-side {
+  min-width: 0;
+}
+
+.can-analyzer-side .ant-card {
+  position: sticky;
+  top: 12px;
+}
+
+.can-status-card .ant-card-body {
+  overflow-x: auto;
+}
+
+.can-status-strip {
+  display: grid;
+  grid-template-columns: minmax(300px, 1fr) 150px 140px 90px 136px 190px;
+  gap: 24px;
+  align-items: center;
+  min-width: 1040px;
+}
+
+.can-status-badges {
+  min-width: 0;
+}
+
+.can-status-stat {
+  min-width: 0;
+}
+
+.can-status-stat .ant-statistic-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.can-status-stat .ant-statistic-content {
+  overflow: hidden;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1, "lnum" 1;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.can-status-stat .ant-statistic-content-value,
+.can-status-stat .ant-statistic-content-suffix {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1, "lnum" 1;
+}
+
+.can-trace-shell {
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-color: rgba(194, 203, 216, 0.45) rgba(255, 255, 255, 0.05);
+}
+
+.can-trace-shell::-webkit-scrollbar,
+.can-trace-body::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+.can-trace-shell::-webkit-scrollbar-track,
+.can-trace-body::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.can-trace-shell::-webkit-scrollbar-thumb,
+.can-trace-body::-webkit-scrollbar-thumb {
+  background: rgba(194, 203, 216, 0.45);
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
+.can-trace-table {
+  min-width: 100%;
+}
+
+.can-trace-header {
+  display: grid;
+  min-height: 32px;
+  color: #8a8f99;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  background: #171717;
+  border-bottom: 1px solid #303030;
+}
+
+.can-trace-header__cell {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  padding: 4px 12px;
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.can-trace-header__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.can-trace-header__hint {
+  cursor: help;
+  text-decoration: underline dotted;
+}
+
+.can-trace-resizer {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  z-index: 2;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.can-trace-resizer::after {
+  position: absolute;
+  top: 7px;
+  bottom: 7px;
+  left: 3px;
+  width: 1px;
+  content: "";
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.can-trace-resizer:hover::after,
+.can-trace-resizer:focus-visible::after,
+.can-resizing-column .can-trace-resizer::after {
+  background: #4f8cff;
+}
+
+.can-resizing-column {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.can-trace-body {
+  overflow-y: auto;
+  overflow-x: hidden;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12.5px;
+}
+
+.can-trace-virtual {
+  position: relative;
+}
+
+.can-trace-row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: grid;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.can-trace-row--tx {
+  background: rgba(79, 140, 255, 0.1);
+}
+
+.can-trace-cell {
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+  padding: 0 12px;
+  color: #d8dce3;
+  line-height: 22px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.can-trace-cell--muted {
+  color: #8e949d;
+}
+
+.can-trace-cell--decode {
+  color: #aeb5c0;
+}
+
+.can-trace-cell--data {
+  color: #e2e5ea;
+}
+
+@media (max-width: 1180px) {
+  .can-analyzer-workspace {
+    grid-template-columns: minmax(0, 1fr) minmax(320px, 340px);
+  }
+}
+
+@media (max-width: 920px) {
+  .can-analyzer-workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .can-analyzer-side .ant-card {
+    position: static;
+  }
+}
