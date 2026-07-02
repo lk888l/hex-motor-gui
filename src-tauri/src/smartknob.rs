@@ -305,6 +305,33 @@ impl Tuning {
     }
 }
 
+/// Smallest detent width we accept from a user-supplied config. A
+/// non-positive width would invert the dead-zone clamp bounds in
+/// [`snap_to_detent`] (`f64::clamp` panics when min > max — killing the
+/// haptic loop) and divide by zero in the sub-position math.
+const MIN_POSITION_WIDTH_RAD: f64 = 0.001;
+
+/// Clamp a user-supplied custom config to values the 1 kHz loop can safely
+/// consume. Negative gains would flip feedback signs (positive velocity
+/// feedback → self-accelerating knob). `max_position < min_position` is left
+/// alone — that is the documented "unbounded" convention.
+fn sanitize_custom_config(mut c: KnobConfig) -> KnobConfig {
+    c.position_width_radians = c.position_width_radians.max(MIN_POSITION_WIDTH_RAD);
+    c.p_gain = c.p_gain.max(0.0);
+    c.d_gain = c.d_gain.max(0.0);
+    c.strength_scale = c.strength_scale.max(0.0);
+    c.endstop_strength_unit = c.endstop_strength_unit.max(0.0);
+    c.detent_strength_unit = c.detent_strength_unit.max(0.0);
+    c.friction_compensation = c.friction_compensation.max(0.0);
+    c.click_torque_nm = c.click_torque_nm.max(0.0);
+    c.snap_point = c.snap_point.clamp(0.1, 2.0);
+    c.snap_point_bias = c.snap_point_bias.clamp(-1.0, 1.0);
+    if c.min_position <= c.max_position {
+        c.position = c.position.clamp(c.min_position, c.max_position);
+    }
+    c
+}
+
 /// Snapshot handed to the frontend each poll.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SmartKnobState {
@@ -475,9 +502,11 @@ impl SmartKnob {
 
     /// Replace the custom mode config (index 0) with a new one. The haptic
     /// loop picks it up on its next tick and re-applies it on the fly if
-    /// custom mode is currently active.
+    /// custom mode is currently active. The config is sanitized first — the
+    /// 1 kHz loop must never see values that invert clamp bounds or feedback
+    /// signs (see [`sanitize_custom_config`]).
     pub fn set_custom_config(&self, config: KnobConfig) {
-        *self.custom_config.lock().expect("custom_config poisoned") = config;
+        *self.custom_config.lock().expect("custom_config poisoned") = sanitize_custom_config(config);
         self.custom_config_dirty.store(true, Ordering::SeqCst);
     }
 
@@ -927,15 +956,26 @@ async fn haptic_loop(
         if config.is_custom && custom_config_dirty.load(Ordering::SeqCst) {
             custom_config_dirty.store(false, Ordering::SeqCst);
             config = custom_config.lock().expect("custom_config poisoned").clone();
+            // Keep the logical position inside the (possibly narrowed) new
+            // range — the mode-switch path above clamps too. Without this,
+            // shrinking max_position leaves current_position out of range
+            // with no endstop torque anywhere in between (out_of_bounds only
+            // tests equality with the bounds).
+            if config.min_position <= config.max_position {
+                h.detent.current_position =
+                    h.detent.current_position.clamp(config.min_position, config.max_position);
+            }
             h.click.prev_current_position = h.detent.current_position;
             // Propagate explicit config fields to the active tuning so the
-            // haptic feel changes immediately.
-            // strength_scale is deliberately NOT propagated — the user
-            // controls it independently via the Tuning — Feel slider.
-            tun.p_gain = config.p_gain;
-            tun.d_gain = config.d_gain;
-            tun.friction_compensation = config.friction_compensation;
-            tun.click_torque_nm = config.click_torque_nm;
+            // haptic feel changes immediately, with the same non-negative
+            // clamps as set_tuning (a negative d_gain would be positive
+            // velocity feedback). strength_scale is deliberately NOT
+            // propagated — the user controls it independently via the
+            // Tuning — Feel slider.
+            tun.p_gain = config.p_gain.max(0.0);
+            tun.d_gain = config.d_gain.max(0.0);
+            tun.friction_compensation = config.friction_compensation.max(0.0);
+            tun.click_torque_nm = config.click_torque_nm.max(0.0);
             // Persist into per-mode tuning + shared mutex so the frontend
             // sees the updated values on the next poll.
             if let Some(slot) = per_mode_tuning
@@ -986,17 +1026,32 @@ async fn haptic_loop(
         let click_active = tun.click_torque_nm > 0.0
             && !out_of_bounds
             && config.detent_positions.is_empty();
-        // Detect detent transition: fire a click burst if position changed.
-        if click_active && h.detent.current_position != h.click.prev_current_position {
+        // Track detent transitions unconditionally — if `prev` were only
+        // updated while clicks are active, raising the click slider after
+        // rotating in a click-less mode would fire a burst into a stationary
+        // knob for a transition that happened long ago. Only *arm* the burst
+        // when clicks are active.
+        if h.detent.current_position != h.click.prev_current_position {
             h.click.prev_current_position = h.detent.current_position;
-            h.click.ticks_remaining = CLICK_TICKS_PER_PHASE * 2;
-            h.click.dir = -h.click.dir;
+            if click_active {
+                h.click.ticks_remaining = CLICK_TICKS_PER_PHASE * 2;
+                h.click.dir = -h.click.dir;
+            }
         }
         let click_torque = compute_click_torque(&mut h.click, tun.click_torque_nm, click_active);
 
         // ── 9. clamp total torque ──
-        let torque_nm = (haptic_component + click_torque + min_restoring + friction_torque)
-            .clamp(-tun.torque_limit_nm, tun.torque_limit_nm);
+        // Runaway guard on the TOTAL command, not just the PID term: above
+        // MAX_VEL_RAD_S every component must go silent. Friction compensation
+        // points along the direction of motion and click bursts keep firing
+        // as detents fly past — left unguarded they would actively sustain
+        // the very runaway this guard exists to stop.
+        let torque_nm = if velocity_rad_s.abs() > MAX_VEL_RAD_S {
+            0.0
+        } else {
+            (haptic_component + click_torque + min_restoring + friction_torque)
+                .clamp(-tun.torque_limit_nm, tun.torque_limit_nm)
+        };
 
         // ── 10. stream RPDO frame ──
         let data = build_rpdo_frame(torque_nm, tun.max_torque_permille);

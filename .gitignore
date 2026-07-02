@@ -3,8 +3,9 @@
 **/*.rs.bk
 .DS_Store
 
-# frontend (Vite + npm)
-/node_modules/
+# frontend (Vite + npm) — no trailing slash: also matches a node_modules
+# symlink (used by review worktrees), not only a real directory.
+/node_modules
 /dist/
 npm-debug.log*
 

@@ -59,6 +59,21 @@ export function SmartKnobPanel({ connected, devices }: { connected: boolean; dev
   // their tweaks.  Lazy: only populated when the user touches a slider.
   const perModeTuning = useRef<Map<number, PerModeTuning>>(new Map());
 
+  // Timestamp of the user's last local tuning edit. The poll's echo-sync is
+  // suppressed for a grace period after it, so a stale backend echo can't
+  // snap an input back while the user is still typing/stepping. A mode
+  // switch clears it — the backend's per-mode restore must reach the
+  // sliders immediately, or a slider nudge during the leftover grace would
+  // persist the previous mode's values into the new mode's slot.
+  const lastEditRef = useRef(0);
+  const EDIT_GRACE_MS = 1200;
+
+  // Serializes pickMode's backend pushes across rapid mode clicks: without
+  // this, two clicks' async closures interleave and one click's set_tuning
+  // can land after the other click's set_config, persisting into the wrong
+  // per-mode slot.
+  const pickSeqRef = useRef<Promise<void>>(Promise.resolve());
+
   // Fetch the preset list once (it's static, connection-independent).
   // Also seed the custom config placeholder from index 0.
   useEffect(() => {
@@ -90,14 +105,18 @@ export function SmartKnobPanel({ connected, devices }: { connected: boolean; dev
         if (alive) {
           setState(s);
           // Sync tuning values so config-driven changes (e.g. detent_strength →
-          // p_gain) propagate to the sliders.  strength_scale is excluded —
-          // the user controls it independently via the Tuning — Feel slider.
-          setPGain(s.p_gain);
-          setDGain(s.d_gain);
-          setTorqueLimit(s.torque_limit_nm);
-          setMaxTorque(s.max_torque_permille);
-          setFrictionComp(s.friction_compensation);
-          setClickTorque(s.click_torque_nm);
+          // p_gain) and per-mode restores propagate to the sliders.
+          // strength_scale is excluded — the user controls it independently via
+          // the Tuning — Feel slider. Skipped right after a local edit so the
+          // backend echo doesn't fight the input the user is typing into.
+          if (performance.now() - lastEditRef.current > EDIT_GRACE_MS) {
+            setPGain(s.p_gain);
+            setDGain(s.d_gain);
+            setTorqueLimit(s.torque_limit_nm);
+            setMaxTorque(s.max_torque_permille);
+            setFrictionComp(s.friction_compensation);
+            setClickTorque(s.click_torque_nm);
+          }
         }
       } catch {
         /* transient */
@@ -175,59 +194,83 @@ export function SmartKnobPanel({ connected, devices }: { connected: boolean; dev
   const pickMode = useCallback(
     (idx: number) => {
       setModeIndex(idx);
-      // Restore per-mode tuning if the user has touched this mode before;
-      // otherwise fall back to the preset defaults.
+      // End any edit-grace window: the poll must sync the new mode's
+      // restored tuning right away (see lastEditRef).
+      lastEditRef.current = 0;
+      // The backend's per_mode_tuning is the single authority for a mode's
+      // tuning: it restores the user's tweaks (or the mode's stock defaults,
+      // incl. its safety torque limits) on switch, and the poll syncs the
+      // sliders from that. The frontend only pushes tuning for modes the
+      // user has actually touched in this panel — pushing anything for an
+      // untouched mode would overwrite its backend defaults with whatever
+      // the *previous* mode's sliders happened to hold.
       const saved = perModeTuning.current.get(idx);
-      let s: number, tl: number, mt: number, fc: number, ct: number, pg: number, dg: number;
+      let merged: KnobConfig | null = null;
       if (saved) {
-        s = saved.strength;
-        tl = saved.torqueLimit;
-        mt = saved.maxTorque;
-        fc = saved.frictionComp;
-        ct = saved.clickTorque;
-        pg = saved.pGain;
-        dg = saved.dGain;
+        setStrength(saved.strength);
+        setTorqueLimit(saved.torqueLimit);
+        setMaxTorque(saved.maxTorque);
+        setFrictionComp(saved.frictionComp);
+        setClickTorque(saved.clickTorque);
+        setPGain(saved.pGain);
+        setDGain(saved.dGain);
+        if (idx === 0 && customConfig) {
+          merged = {
+            ...customConfig,
+            strength_scale: saved.strength,
+            friction_compensation: saved.frictionComp,
+            click_torque_nm: saved.clickTorque,
+            p_gain: saved.pGain,
+            d_gain: saved.dGain,
+          };
+          setCustomConfig(merged);
+        }
       } else {
-        s = configs[idx]?.strength_scale ?? 0.15;
-        tl = torqueLimit;
-        mt = maxTorque;
-        fc = configs[idx]?.friction_compensation ?? 0;
-        ct = configs[idx]?.click_torque_nm ?? 0;
-        pg = configs[idx]?.p_gain ?? 0;
-        dg = configs[idx]?.d_gain ?? 0;
-      }
-      setStrength(s);
-      setTorqueLimit(tl);
-      setMaxTorque(mt);
-      setFrictionComp(fc);
-      setClickTorque(ct);
-      setPGain(pg);
-      setDGain(dg);
-      if (idx === 0 && customConfig) {
-        setCustomConfig({
-          ...customConfig,
-          strength_scale: s,
-          friction_compensation: fc,
-          click_torque_nm: ct,
-          p_gain: pg,
-          d_gain: dg,
-        });
+        // Optimistic display of what the backend will restore; the poll
+        // corrects tl/mt (backend per-mode defaults) within one tick.
+        setStrength(configs[idx]?.strength_scale ?? 0.15);
+        setFrictionComp(configs[idx]?.friction_compensation ?? 0);
+        setClickTorque(configs[idx]?.click_torque_nm ?? 0);
+        setPGain(configs[idx]?.p_gain ?? 0);
+        setDGain(configs[idx]?.d_gain ?? 0);
+        if (idx === 0 && customConfig) merged = customConfig;
       }
       if (running) {
-        api.smartknobSetConfig(idx).catch(() => {});
-        // When switching to custom mode, push the local custom config so the
-        // backend picks up any edits made while stopped.
-        if (idx === 0 && customConfig) {
-          api.smartknobSetCustomConfig(customConfig).catch(() => {});
-        }
-        api.smartknobSetTuning(pg, dg, s, tl, mt, fc, ct).catch(() => {});
+        const savedTuning = saved; // capture for the async closure
+        const cfgToPush = merged;
+        // Chain onto the previous click's pushes so rapid mode clicks stay
+        // strictly ordered end-to-end.
+        pickSeqRef.current = pickSeqRef.current.then(async () => {
+          try {
+            // Sequenced: set_tuning persists into the *requested* mode's
+            // slot, so the config switch must land first (fire-and-forget
+            // invokes race and can write the new mode's tuning into the old
+            // mode's slot).
+            await api.smartknobSetConfig(idx);
+            if (idx === 0 && cfgToPush) await api.smartknobSetCustomConfig(cfgToPush);
+            if (savedTuning) {
+              await api.smartknobSetTuning(
+                savedTuning.pGain,
+                savedTuning.dGain,
+                savedTuning.strength,
+                savedTuning.torqueLimit,
+                savedTuning.maxTorque,
+                savedTuning.frictionComp,
+                savedTuning.clickTorque,
+              );
+            }
+          } catch {
+            /* transient — poll re-syncs the UI either way */
+          }
+        });
       }
     },
-    [running, configs, torqueLimit, maxTorque, customConfig]
+    [running, configs, customConfig]
   );
 
   const applyTuning = useCallback(
     (s: number, tl: number, mt: number, fc: number, ct: number, pg: number, dg: number) => {
+      lastEditRef.current = performance.now();
       setStrength(s);
       setTorqueLimit(tl);
       setMaxTorque(mt);
@@ -259,6 +302,7 @@ export function SmartKnobPanel({ connected, devices }: { connected: boolean; dev
   // dial feedback) and push to the backend if running.
   const applyCustomConfig = useCallback(
     (updates: Partial<KnobConfig>) => {
+      lastEditRef.current = performance.now();
       setCustomConfig((prev) => {
         if (!prev) return prev;
         const next: KnobConfig = {
