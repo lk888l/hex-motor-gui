@@ -12,12 +12,13 @@ import { Hopea3Panel } from "./components/Hopea3Panel";
 import { SmartKnobPanel } from "./components/SmartKnobPanel";
 import { ZenohPanel } from "./components/ZenohPanel";
 import { ArmPanel } from "./components/ArmPanel";
+import { ControllerConfigPanel } from "./components/ControllerConfigPanel";
 import { CanAnalyzerPanel } from "./components/CanAnalyzerPanel";
 import { TutorialModal, TUTORIALS } from "./components/Tutorial";
 import type { MotorInfo } from "./types";
 import "./App.css";
 
-type Tool = "control" | "changeId" | "zero" | "hopea3" | "smartknob" | "zenoh" | "arm" | "canalyzer";
+type Tool = "control" | "changeId" | "zero" | "hopea3" | "smartknob" | "zenoh" | "arm" | "config" | "canalyzer";
 
 const DEVICE_POLL_MS = 700;
 
@@ -120,6 +121,7 @@ export default function App() {
     smartknob: { title: t("toolSmartKnob"), desc: t("toolSmartKnobDesc") },
     zenoh: { title: t("toolBaseZenoh"), desc: t("toolBaseZenohDesc") },
     arm: { title: t("toolArmZenoh"), desc: t("toolArmZenohDesc") },
+    config: { title: t("toolConfig"), desc: t("toolConfigDesc") },
     canalyzer: { title: t("toolCanalyzer"), desc: t("toolCanalyzerDesc") },
   } satisfies Record<Tool, { title: string; desc: string }>;
   const { title: toolTitle, desc: toolDesc } = toolMeta[tool];
@@ -127,8 +129,13 @@ export default function App() {
   // hopea3 / smartknob / zenoh / arm / canalyzer 都是整屏面板;zenoh/arm 走 Zenoh,
   // canalyzer 自带总线连接,都不使用顶栏的电机 ConnectBar。
   const showSidebar =
-    tool !== "hopea3" && tool !== "smartknob" && tool !== "zenoh" && tool !== "arm" && tool !== "canalyzer";
-  const showConnectBar = tool !== "zenoh" && tool !== "arm" && tool !== "canalyzer";
+    tool !== "hopea3" &&
+    tool !== "smartknob" &&
+    tool !== "zenoh" &&
+    tool !== "arm" &&
+    tool !== "config" &&
+    tool !== "canalyzer";
+  const showConnectBar = tool !== "zenoh" && tool !== "arm" && tool !== "config" && tool !== "canalyzer";
 
   return (
     <Layout className={`app-shell app-shell--${tool}`}>
@@ -185,6 +192,8 @@ export default function App() {
             <ZenohPanel />
           ) : tool === "arm" ? (
             <ArmPanel />
+          ) : tool === "config" ? (
+            <ControllerConfigPanel />
           ) : tool === "canalyzer" ? (
             <CanAnalyzerPanel />
           ) : tool === "changeId" ? (
@@ -276,6 +285,13 @@ function ToolPicker({ onPick }: { onPick: (t: Tool) => void }) {
             tag={t("tagMobileBase")}
             accent="orange"
             onClick={() => onPick("hopea3")}
+          />
+          <ToolCard
+            title={t("toolConfig")}
+            desc={t("toolConfigDesc")}
+            tag={t("tagConfig")}
+            accent="slate"
+            onClick={() => onPick("config")}
           />
         </ToolSection>
 

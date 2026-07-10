@@ -262,6 +262,68 @@ export interface ArmUrdf {
   tip_link: string;   // 工具安装 link 名(EE 拼接处)
 }
 
+// ── Controller Config(Zenoh) (mirrors zenoh_config.rs DTOs) ──
+export interface ApiVersion {
+  major: number;
+  minor: number;
+  patch: number;
+}
+
+export interface RobotRef {
+  robot_index: string;
+  kind: number;
+  kind_name: string; // "arm" | "base" | "lift" | "hand" | "unknown"
+  model: string;
+}
+
+/** A discovered controller (`<cid>/info`). `cid` = key prefix `hexmeow/<controller_id>`. */
+export interface ControllerInfo {
+  cid: string;
+  controller_id: string;
+  fw_version: string;
+  api_version: ApiVersion | null;
+  features: string[];
+  robots: RobotRef[];
+}
+
+/** `<cid>/config` read: file text + fingerprint + path + recovery flag. */
+export interface ConfigGetDto {
+  yaml: string;
+  sha256: string;
+  path: string;
+  mtime_unix: number;
+  schema_version: ApiVersion | null;
+  recovery_mode: boolean;
+}
+
+/** A semantic red-line change (mock flip / CAN swap / kind swap / calibration env). */
+export interface CriticalChange {
+  robot_id: string;
+  field: string;
+  old: string;
+  new: string;
+}
+
+export interface ConfigValidateResult {
+  ok: boolean;
+  errors: string[];
+  critical_changes: CriticalChange[];
+}
+
+export interface ConfigSetResult {
+  ok: boolean;
+  errors: string[];
+  critical_changes: CriticalChange[];
+  sha256: string;
+  applied: boolean;
+  robots: string[];
+}
+
+export interface RestartResult {
+  ok: boolean;
+  robots: string[];
+}
+
 // ── CAN Analyzer (mirrors analyzer.rs DTOs) ──
 export interface CanTraceFrame {
   seq: number;

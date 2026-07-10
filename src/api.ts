@@ -3,7 +3,7 @@
 // snake_case parameters.
 
 import { invoke } from "@tauri-apps/api/core";
-import type { ArmInfo, ArmUrdf, BaseInfo, CanAggReply, CanAnalyzerStatus, CanBusHealth, CanFilterSpec, CanSendSpec, CanTraceReply, EventsSnapshot, Hopea3InitProgress, Hopea3State, ImuState, KnobConfig, LiveState, LogLine, MotorInfo, MotorMode, MotorTarget, SmartKnobState, ZenohArmState, ZenohBaseState } from "./types";
+import type { ArmInfo, ArmUrdf, BaseInfo, CanAggReply, CanAnalyzerStatus, CanBusHealth, CanFilterSpec, CanSendSpec, CanTraceReply, ConfigGetDto, ConfigSetResult, ConfigValidateResult, ControllerInfo, EventsSnapshot, Hopea3InitProgress, Hopea3State, ImuState, KnobConfig, LiveState, LogLine, MotorInfo, MotorMode, MotorTarget, RestartResult, SmartKnobState, ZenohArmState, ZenohBaseState } from "./types";
 
 export const api = {
   connect: (iface: string, ourNid: number, broadcastHeartbeat: boolean) =>
@@ -162,6 +162,24 @@ export const api = {
   armGetEvents: () => invoke<EventsSnapshot>("arm_get_events"),
   armGetLogs: () => invoke<LogLine[]>("arm_get_logs"),
   armClearFault: () => invoke<void>("arm_clear_fault"),
+
+  // Controller Config(Zenoh)
+  configConnect: (connect: string) => invoke<void>("config_connect", { connect }),
+  configDisconnect: () => invoke<void>("config_disconnect"),
+  configDiscover: () => invoke<ControllerInfo[]>("config_discover"),
+  configGet: (cid: string) => invoke<ConfigGetDto>("config_get", { cid }),
+  configValidate: (cid: string, yaml: string) =>
+    invoke<ConfigValidateResult>("config_validate", { cid, yaml }),
+  configSet: (
+    cid: string,
+    yaml: string,
+    expectSha256: string,
+    apply: boolean,
+    confirm: boolean,
+    force: boolean,
+  ) => invoke<ConfigSetResult>("config_set", { cid, yaml, expectSha256, apply, confirm, force }),
+  configRestart: (cid: string, confirm: boolean, force: boolean) =>
+    invoke<RestartResult>("config_restart", { cid, confirm, force }),
 };
 
 /** Normalise a thrown Tauri error (usually a plain string) to a message. */

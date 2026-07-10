@@ -17,6 +17,9 @@ use crate::dto::{LiveStateDto, MotorInfoDto, MotorModeDto, MotorTargetDto};
 use crate::state::AppState;
 use crate::zenoh_base::{BaseInfo, ZenohBaseState, ZenohConn};
 use crate::zenoh_arm::{ArmInfo, ArmUrdf, ZenohArmConn, ZenohArmState};
+use crate::zenoh_config::{
+    ConfigGetDto, ConfigSetResult, ConfigValidateResult, ControllerInfoDto, RestartResult, ZenohConfigConn,
+};
 
 /// Anything we hand back to the frontend.
 type CmdResult<T> = Result<T, String>;
@@ -977,4 +980,73 @@ pub async fn arm_clear_fault(state: State<'_, AppState>) -> CmdResult<()> {
     let g = state.zenoh_arm.lock().await;
     let c = g.as_ref().ok_or_else(|| "未连接 Arm Zenoh".to_string())?;
     c.clear_fault().await.map_err(err)
+}
+
+// ───────────────────────── Controller Config(Zenoh)─────────────────────────
+
+/// 连接到控制器网络(config 面板专用 Session)。`connect` 空=仅多播发现。
+#[tauri::command]
+pub async fn config_connect(state: State<'_, AppState>, connect: String) -> CmdResult<()> {
+    let mut g = state.config.lock().await;
+    if g.is_some() {
+        return Err("Config Zenoh 已连接;先 disconnect".into());
+    }
+    *g = Some(ZenohConfigConn::open(&connect).await.map_err(err)?);
+    log::info!("Config Zenoh 已连接: {connect}");
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn config_disconnect(state: State<'_, AppState>) -> CmdResult<()> {
+    state.config.lock().await.take();
+    Ok(())
+}
+
+/// 发现网络里的控制器(走 `<cid>/info`;恢复模式下零 robot 也可发现)。
+#[tauri::command]
+pub async fn config_discover(state: State<'_, AppState>) -> CmdResult<Vec<ControllerInfoDto>> {
+    let g = state.config.lock().await;
+    let c = g.as_ref().ok_or_else(|| "未连接 Config Zenoh".to_string())?;
+    Ok(c.discover().await)
+}
+
+/// 读取某控制器的 launch.yaml(含 sha256 / path / mtime / schema_version / recovery_mode)。
+#[tauri::command]
+pub async fn config_get(state: State<'_, AppState>, cid: String) -> CmdResult<ConfigGetDto> {
+    let g = state.config.lock().await;
+    let c = g.as_ref().ok_or_else(|| "未连接 Config Zenoh".to_string())?;
+    c.get(&cid).await.map_err(err)
+}
+
+/// 干跑校验(errors + 语义红线 critical_changes)。不落盘。
+#[tauri::command]
+pub async fn config_validate(state: State<'_, AppState>, cid: String, yaml: String) -> CmdResult<ConfigValidateResult> {
+    let g = state.config.lock().await;
+    let c = g.as_ref().ok_or_else(|| "未连接 Config Zenoh".to_string())?;
+    c.validate(&cid, &yaml).await.map_err(err)
+}
+
+/// 写入配置(乐观锁 expectSha256;apply=true 立即生效;有红线时 confirm 必须 true)。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn config_set(
+    state: State<'_, AppState>,
+    cid: String,
+    yaml: String,
+    expect_sha256: String,
+    apply: bool,
+    confirm: bool,
+    force: bool,
+) -> CmdResult<ConfigSetResult> {
+    let g = state.config.lock().await;
+    let c = g.as_ref().ok_or_else(|| "未连接 Config Zenoh".to_string())?;
+    c.set(&cid, &yaml, &expect_sha256, apply, confirm, force).await.map_err(err)
+}
+
+/// 单独"应用":重启该控制器全部子进程(confirm 复述后为 true;force 越过会话检查)。
+#[tauri::command]
+pub async fn config_restart(state: State<'_, AppState>, cid: String, confirm: bool, force: bool) -> CmdResult<RestartResult> {
+    let g = state.config.lock().await;
+    let c = g.as_ref().ok_or_else(|| "未连接 Config Zenoh".to_string())?;
+    c.restart(&cid, confirm, force).await.map_err(err)
 }

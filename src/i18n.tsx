@@ -270,6 +270,12 @@ const STRINGS = {
     en: "Digital twin, gravity compensation, gravity setup and preset postures.",
     zh: "机械臂数字孪生、重力补偿、设置重力与预设位姿。",
   },
+  toolConfig: { en: "Controller Config", zh: "控制器配置" },
+  toolConfigDesc: {
+    en: "Edit the controller's launch.yaml over Zenoh: validate, save and apply (restarts robots).",
+    zh: "通过 Zenoh 编辑控制器 launch.yaml:校验、保存、应用(会重启机器人)。",
+  },
+  tagConfig: { en: "Config", zh: "配置" },
   // Base(Zenoh) panel
   zEndpoint: { en: "Endpoint (optional)", zh: "地址(可选)" },
   zEndpointHint: { en: "blank = auto-scan LAN (multicast)", zh: "留空 = 自动扫描局域网(组播)" },
@@ -305,6 +311,105 @@ const STRINGS = {
   zTwist: { en: "Measured twist", zh: "实测速度" },
   zTelemetry: { en: "Telemetry", zh: "遥测" },
   zStop: { en: "STOP", zh: "急停归零" },
+
+  // Controller Config panel
+  cfgConnect: { en: "Connect", zh: "连接" },
+  cfgDisconnect: { en: "Disconnect", zh: "断开" },
+  cfgDiscover: { en: "Discover controllers", zh: "发现控制器" },
+  cfgFound: { en: "Found", zh: "已发现" },
+  cfgController: { en: "Controller", zh: "控制器" },
+  cfgNoController: {
+    en: "No controller found (is the controller running?)",
+    zh: "未发现控制器（控制器在运行吗？）",
+  },
+  cfgConnected: { en: "Connected", zh: "已连接" },
+  cfgDisconnected: { en: "Disconnected", zh: "未连接" },
+  cfgReload: { en: "Reload", zh: "重新加载" },
+  cfgFeatures: { en: "Features", zh: "功能" },
+  cfgRobotsOnController: { en: "Robots", zh: "机器人" },
+  cfgFwVersion: { en: "Firmware", zh: "固件" },
+  // Top bar meta
+  cfgPath: { en: "Path", zh: "路径" },
+  cfgSha: { en: "sha256", zh: "指纹 sha256" },
+  cfgMtime: { en: "Modified", zh: "修改时间" },
+  cfgSchemaVersion: { en: "Schema", zh: "schema 版本" },
+  // Recovery mode banner
+  cfgRecoveryTitle: {
+    en: "Recovery mode — config missing/invalid, robots not started",
+    zh: "恢复模式 —— 配置缺失/非法，机器人未启动",
+  },
+  cfgRecoveryDesc: {
+    en: "Save a valid configuration to recover. The controller is still discoverable and writable in this state.",
+    zh: "保存一份有效配置以恢复运行。此状态下控制器仍可发现、可写入。",
+  },
+  // Editor
+  cfgEditorTitle: { en: "launch.yaml", zh: "launch.yaml" },
+  cfgEditorHint: {
+    en: "Full-file edit. Validate before saving; illegal configs never touch disk.",
+    zh: "全量文件编辑。保存前先校验；非法配置绝不落盘。",
+  },
+  cfgModified: { en: "Unsaved changes", zh: "未保存的修改" },
+  cfgClean: { en: "In sync with disk", zh: "与磁盘一致" },
+  cfgReadonlyTitle: { en: "Read-only — GUI too old", zh: "只读 —— GUI 版本过旧" },
+  cfgReadonlyDesc: {
+    en: "This config's schema major is newer than this GUI supports. Upgrade the GUI to edit.",
+    zh: "此配置的 schema 主版本高于本 GUI 支持范围。请升级 GUI 后再编辑。",
+  },
+  // Validate
+  cfgValidate: { en: "Validate", zh: "校验" },
+  cfgValidateOk: { en: "Validation passed", zh: "校验通过" },
+  cfgValidateFail: { en: "Validation failed", zh: "校验未通过" },
+  cfgErrors: { en: "Errors", zh: "错误" },
+  cfgNoErrors: { en: "No errors", zh: "无错误" },
+  cfgCriticalTitle: { en: "Semantic red-line changes", zh: "语义红线变更" },
+  cfgCriticalHint: {
+    en: "These affect safety (real torque / CAN routing / kind / calibration). You must confirm each before applying.",
+    zh: "以下变更影响安全（真实力矩 / CAN 布线 / kind / 标定）。应用前必须逐条确认。",
+  },
+  // Save / Apply
+  cfgSave: { en: "Save (no apply)", zh: "保存（不应用）" },
+  cfgSaved: { en: "Saved (not applied)", zh: "已保存（未应用）" },
+  cfgSaveFail: { en: "Save failed", zh: "保存失败" },
+  cfgApply: { en: "Save & apply", zh: "保存并应用" },
+  cfgApplied: { en: "Applied", zh: "已应用" },
+  cfgApplyFail: { en: "Apply failed", zh: "应用失败" },
+  cfgRestart: { en: "Restart robots", zh: "重启机器人" },
+  cfgRestartDone: { en: "Restart requested", zh: "已请求重启" },
+  cfgRestartFail: { en: "Restart failed", zh: "重启失败" },
+  // Force switch
+  cfgForce: { en: "Force", zh: "强制" },
+  cfgForceHint: {
+    en: "Bypass the session-in-use / relative-path guards. Dangerous: may yank a robot from another operator.",
+    zh: "越过会话占用 / 相对路径保护。危险：可能从其他操作者手里夺走机器人。",
+  },
+  // Confirm dialog
+  cfgConfirmApplyTitle: { en: "Apply config and restart robots?", zh: "应用配置并重启机器人？" },
+  cfgConfirmSaveTitle: { en: "Save configuration?", zh: "保存配置？" },
+  cfgConfirmApplyBody: {
+    en: "Every robot on this controller will restart (one file governs all robots).",
+    zh: "本控制器上的全部机器人都会重启（一个文件管全部机器人）。",
+  },
+  cfgConfirmRecite: { en: "Confirm each red-line change:", zh: "请逐条确认以下红线变更：" },
+  cfgAffectedRobots: { en: "Affected robots", zh: "受影响机器人" },
+  cfgNoRobots: { en: "(no robots — recovery mode)", zh: "（无机器人 —— 恢复模式）" },
+  cfgConfirmOk: { en: "Confirm", zh: "确认" },
+  cfgConfirmCancel: { en: "Cancel", zh: "取消" },
+  // External-change / 409
+  cfgConflictTitle: { en: "Config changed elsewhere", zh: "配置已被他处修改" },
+  cfgConflictDesc: {
+    en: "The file was modified externally (e.g. ssh) since you loaded it. Reload to get the latest (discards your unsaved edits).",
+    zh: "自你加载后，文件被外部（如 ssh）修改。重新加载以获取最新内容（会丢弃你未保存的修改）。",
+  },
+  cfgReloadDiscard: { en: "Reload (discard my edits)", zh: "重新加载（丢弃我的修改）" },
+  cfgConflictShort: { en: "Config changed elsewhere — reload.", zh: "配置已被他处修改，请重新加载。" },
+  // Misc
+  cfgConnectFirst: { en: "Connect and select a controller first.", zh: "请先连接并选择一个控制器。" },
+  cfgSelectController: { en: "Select a controller", zh: "选择控制器" },
+  cfgNoChanges: { en: "No unsaved changes.", zh: "没有未保存的修改。" },
+  cfgApplyNoChangesHint: {
+    en: "Editor matches disk. Use Restart robots to re-apply the saved file.",
+    zh: "编辑内容与磁盘一致。用“重启机器人”重新应用已保存的文件。",
+  },
 
   // SmartKnob panel
   skConnectFirst: { en: "Connect to the bus first.", zh: "请先连接总线。" },

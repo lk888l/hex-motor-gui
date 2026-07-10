@@ -17,6 +17,7 @@ mod smartknob;
 mod state;
 mod zenoh_arm;
 mod zenoh_base;
+mod zenoh_config;
 
 use state::AppState;
 
@@ -111,6 +112,13 @@ pub fn run() {
             commands::arm_get_events,
             commands::arm_get_logs,
             commands::arm_clear_fault,
+            commands::config_connect,
+            commands::config_disconnect,
+            commands::config_discover,
+            commands::config_get,
+            commands::config_validate,
+            commands::config_set,
+            commands::config_restart,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

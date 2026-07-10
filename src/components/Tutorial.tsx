@@ -259,6 +259,7 @@ export const TUTORIALS: Record<string, Slide[]> = {
   smartknob: SMARTKNOB_SLIDES,
   zenoh: placeholderSlides("zenoh"),
   arm: placeholderSlides("arm"),
+  config: placeholderSlides("config"),
   canalyzer: CANALYZER_SLIDES,
 };
 
