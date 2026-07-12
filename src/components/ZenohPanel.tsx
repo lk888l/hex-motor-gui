@@ -19,7 +19,8 @@ const KEY_MAP: Record<string, "fwd" | "back" | "left" | "right" | "ccw" | "cw"> 
   e: "cw",
 };
 
-export function ZenohPanel() {
+/** embedded:由机器人控制台托管(同 ArmPanel):自动连接、锁定选中、隐藏连接 UI。 */
+export function ZenohPanel({ embedded }: { embedded?: { endpoint: string; prefix: string; model: string } } = {}) {
   const { message } = AntdApp.useApp();
   const { t } = useI18n();
 
@@ -58,8 +59,27 @@ export function ZenohPanel() {
     };
   }, [connected]);
 
+  useEffect(() => {
+    if (!embedded) return;
+    let alive = true;
+    (async () => {
+      try { await api.zenohConnect(embedded.endpoint); } catch { /* 已连接 = 复用 */ }
+      if (!alive) return;
+      setConnected(true);
+      try {
+        let list = await api.zenohDiscover();
+        if (!list.length) { await new Promise((r) => setTimeout(r, 900)); list = await api.zenohDiscover(); }
+        if (alive) setBases(list);
+      } catch { /* transient */ }
+      if (alive) setSelected(embedded.prefix);
+    })();
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [embedded?.endpoint, embedded?.prefix]);
   useEffect(() => () => {
-    api.zenohDisconnect().catch(() => {});
+    if (embedded) { api.zenohRelease().catch(() => {}); }
+    else { api.zenohDisconnect().catch(() => {}); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // 选中(手动或自动)某底盘即诊断聚焦:订阅其 events/logs + 播种历史(与取控解耦,只读也生效)。
@@ -119,7 +139,8 @@ export function ZenohPanel() {
   }, [selected, message, t]);
 
   const acquire = useCallback(async () => {
-    const b = bases.find((x) => x.prefix === selected);
+    const b = bases.find((x) => x.prefix === selected)
+      ?? (embedded ? { prefix: embedded.prefix, model: embedded.model } : null);
     if (!b) return;
     try {
       await api.zenohAcquire(b.prefix, b.model);
@@ -128,7 +149,7 @@ export function ZenohPanel() {
     } catch (e) {
       message.error(errMsg(e));
     }
-  }, [bases, selected, message, t]);
+  }, [bases, selected, message, t, embedded]);
 
   const release = useCallback(async () => {
     try {
@@ -227,7 +248,7 @@ export function ZenohPanel() {
   return (
     <div className="zenoh-panel">
       <section className="zenoh-connect-panel">
-        <label className="zenoh-field zenoh-field--endpoint">
+        {!embedded && (<label className="zenoh-field zenoh-field--endpoint">
           <span>{t("zEndpoint")}</span>
           <Input
             value={endpoint}
@@ -235,13 +256,13 @@ export function ZenohPanel() {
             placeholder={t("zEndpointHint")}
             onChange={(e) => setEndpoint(e.target.value)}
           />
-        </label>
+        </label>)}
         <div className="zenoh-connect-panel__actions">
-          {connected ? (
+          {!embedded && (connected ? (
             <Button onClick={disconnect}>{t("zDisconnect")}</Button>
           ) : (
             <Button type="primary" loading={busy} onClick={connect}>{t("zConnect")}</Button>
-          )}
+          ))}
           <Button disabled={!connected} onClick={discover}>{t("zDiscover")}</Button>
         </div>
         <div className="zenoh-discovery">

@@ -9,6 +9,8 @@ import { api } from "../api";
 import type { RobotNode } from "../types";
 import { useI18n } from "../i18n";
 import EePanel from "./EePanel";
+import { ArmPanel } from "./ArmPanel";
+import { ZenohPanel } from "./ZenohPanel";
 
 const { Sider, Content } = Layout;
 const DISCOVER_MS = 3000;
@@ -97,7 +99,13 @@ export default function RobotConsole() {
           <Empty description={connected ? t("consolePickRobot") : t("consoleConnectFirst")} style={{ marginTop: 80 }} />
         )}
         {sel && sel.kind_name === "ee" && <EePanel key={sel.prefix} node={sel} />}
-        {sel && sel.kind_name !== "ee" && (
+        {sel && sel.kind_name === "arm" && (
+          <ArmPanel key={sel.prefix} embedded={{ endpoint, prefix: sel.prefix, model: sel.model }} />
+        )}
+        {sel && sel.kind_name === "base" && (
+          <ZenohPanel key={sel.prefix} embedded={{ endpoint, prefix: sel.prefix, model: sel.model }} />
+        )}
+        {sel && !["ee", "arm", "base"].includes(sel.kind_name) && (
           <Card size="small" title={`${sel.robot_index} · ${sel.model}`}>
             <p>{t("consoleKindPending")}</p>
             <p style={{ opacity: 0.6, fontSize: 12 }}>{t("consoleKindPendingHint")}</p>

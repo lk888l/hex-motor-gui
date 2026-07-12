@@ -18,7 +18,8 @@ const PRESETS: { name: string; q: number[] }[] = [
   { name: "Tuck", q: [0, 1.4, 2.4, 0, 0.6, 0] },
 ];
 
-export function ArmPanel() {
+/** embedded:由机器人控制台托管 —— 自动连接(复用已有连接)、锁定选中机器人、隐藏连接/发现 UI。 */
+export function ArmPanel({ embedded }: { embedded?: { endpoint: string; prefix: string; model: string } } = {}) {
   const { message } = AntdApp.useApp();
   const { t } = useI18n();
   const [endpoint, setEndpoint] = useState("");
@@ -50,7 +51,30 @@ export function ArmPanel() {
     const h = window.setInterval(tick, POLL_MS);
     return () => { alive = false; window.clearInterval(h); };
   }, [connected]);
-  useEffect(() => () => { api.armDisconnect().catch(() => {}); }, []);
+  // 控制台托管:自动连接(arm 模块可能已连 → "已连接"报错视为复用)+ 发现 + 锁定选中。
+  useEffect(() => {
+    if (!embedded) return;
+    let alive = true;
+    (async () => {
+      try { await api.armConnect(embedded.endpoint); } catch { /* 已连接 = 复用 */ }
+      if (!alive) return;
+      setConnected(true);
+      try {
+        let list = await api.armDiscover();
+        if (!list.length) { await new Promise((r) => setTimeout(r, 900)); list = await api.armDiscover(); }
+        if (alive) setArms(list);
+      } catch { /* transient */ }
+      if (alive) setSelected(embedded.prefix);
+    })();
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [embedded?.endpoint, embedded?.prefix]);
+  // 卸载:托管态只释放会话(连接留给控制台复用,切树秒回);独立态整体断开。
+  useEffect(() => () => {
+    if (embedded) { api.armRelease().catch(() => {}); }
+    else { api.armDisconnect().catch(() => {}); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // 选中(手动或自动)某臂即诊断聚焦:订阅其 events/logs + 播种历史(与取控解耦,只读也生效)。
   useEffect(() => { if (connected && selected) api.armSetDiagFocus(selected).catch(() => {}); }, [connected, selected]);
   // 选中即拉一次 URDF 供 3D 渲染(整机 arm+EE 或臂-only);取回 null/空则退到捆的 firefly。
@@ -83,10 +107,11 @@ export function ArmPanel() {
     setConnected(false); setArms([]); setSelected(null); setSt(null);
   }, []);
   const acquire = useCallback(async () => {
-    const a = arms.find((x) => x.prefix === selected);
+    const a = arms.find((x) => x.prefix === selected)
+      ?? (embedded ? { prefix: embedded.prefix, model: embedded.model } : null);
     if (!a) return;
     try { await api.armAcquire(a.prefix, a.model); message.success("已取得控制权"); } catch (e) { message.error(errMsg(e)); }
-  }, [arms, selected, message]);
+  }, [arms, selected, message, embedded]);
   const release = useCallback(async () => { try { await api.armRelease(); } catch (e) { message.error(errMsg(e)); } }, [message]);
   const setMode = useCallback(async (m: number) => { try { await api.armSetMode(m); } catch (e) { message.error(errMsg(e)); } }, [message]);
   const setGravity = useCallback(async () => { try { await api.armSetGravity([gx, gy, gz]); } catch (e) { message.error(errMsg(e)); } }, [gx, gy, gz, message]);
@@ -137,6 +162,14 @@ export function ArmPanel() {
     <Space direction="vertical" size={16} className="arm-panel" style={{ width: "100%", maxWidth: 1100 }}>
       <Card size="small" className="app-command-card">
         <Space wrap>
+          {embedded && (<>
+            <Typography.Text strong>{embedded.model}</Typography.Text>
+            <Tag>{embedded.prefix}</Tag>
+            {controlling
+              ? <Button danger onClick={release}>释放</Button>
+              : <Button type="primary" onClick={acquire}>取控</Button>}
+          </>)}
+          {!embedded && (<>
           <Typography.Text>Endpoint</Typography.Text>
           <Input style={{ width: 240 }} value={endpoint} disabled={connected} placeholder="留空=组播扫描,或 tcp/IP:7447" onChange={(e) => setEndpoint(e.target.value)} />
           {connected ? <Button onClick={disconnect}>断开</Button> : <Button type="primary" loading={busy} onClick={connect}>连接</Button>}
@@ -149,6 +182,7 @@ export function ArmPanel() {
           {connected && (controlling
             ? <Button danger onClick={release}>释放</Button>
             : <Button type="primary" disabled={!selected} onClick={acquire}>取控</Button>)}
+          </>)}
         </Space>
       </Card>
 
