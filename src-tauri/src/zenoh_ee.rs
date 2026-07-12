@@ -223,12 +223,22 @@ impl ZenohEeConn {
                     let prefix = parts[..3].join("/");
                     if let Ok(js) = pb::JointState::decode(&*sample.payload().to_bytes()) {
                         if let Some(seq) = js.header.as_ref().map(|h| h.seq) {
-                            let e = seq_track.entry(prefix.clone()).or_insert((0, 0, Instant::now()));
-                            // 回退且不是进程重启(重启=计数器归小,单次;双发布者=高低交替,持续回退)
-                            if seq < e.0 && e.0 - seq < 100_000 { e.1 += 1; } 
-                            e.0 = seq.max(e.0);
-                            if e.1 >= 20 && e.2.elapsed().as_secs() >= 5 {
-                                log::warn!("{prefix}/joint_state seq 反复回退({} 次)——疑似双发布者(孤儿进程?),3D 会两套位形闪烁", e.1);
+                            let e = seq_track.entry(prefix.clone()).or_insert((seq, 0u32, Instant::now()));
+                            // 判定要点(修误报):**5s 窗口内的回退频率**才是双发布者特征——
+                            // ①相邻 ±5 乱序(调度抖动)不计;②大跳(>10k)= 重启重置基线,单次不计;
+                            // 但双发布者计数器相距很远时每个样本都触发大跳 → 按频率照样报。
+                            let last = e.0;
+                            if seq >= last {
+                                e.0 = seq;
+                            } else if last - seq > 10_000 {
+                                e.0 = seq; e.1 += 1; // 重启(窗口内 1 次,不报)或远距双发布者(高频,报)
+                            } else if last - seq > 5 {
+                                e.1 += 1;            // 近距交替回退(双发布者典型)
+                            }
+                            if e.2.elapsed().as_secs() >= 5 {
+                                if e.1 >= 20 {
+                                    log::warn!("{prefix}/joint_state seq 5s 内回退 {} 次——疑似双发布者(孤儿进程?),3D 会两套位形闪烁", e.1);
+                                }
                                 e.1 = 0; e.2 = Instant::now();
                             }
                         }

@@ -255,13 +255,14 @@ export function MachineViewer({ robots, selected, spacing, machines, focusMode, 
         loadUrdfInto(slot, r.prefix, r.kind_name);
       }
     });
-    // 视觉载体解析:被绑 EE 没有自己的 slot——它的可视化在宿主臂整机模型的 ee_ 子树里。
-    // 聚焦/隐藏/高亮/环绕全部以载体为准(否则选中 ee0 → 找不到 slot → 原点环绕/全场隐藏)。
+    // 视觉载体解析:被绑 EE 的可视化在宿主臂整机模型的 ee_ 子树里。判据与可见性过滤**同源**
+    // (assembledCids)——不能看 slots.has:启动早期臂未拼装时 ee 曾短暂可见,会留下停在旧散装
+    // 格位的幽灵 slot,按 slot 存在性判断会环绕那个隐形组(实测 bug:点爪后环绕到 base 附近)。
     let visualSelected = selected;
     let eeSubtree = false;
-    if (selected && !slots.has(selected)) {
+    if (selected) {
       const selRobot = robots.find((r) => r.prefix === selected);
-      if (selRobot?.kind_name === "ee") {
+      if (selRobot?.kind_name === "ee" && assembledCids.has(selRobot.cid)) {
         const host = robots.find((r) => r.kind_name === "arm" && r.cid === selRobot.cid && slots.get(r.prefix)?.assembled);
         if (host) { visualSelected = host.prefix; eeSubtree = true; }
       }
