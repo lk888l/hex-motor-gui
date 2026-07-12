@@ -196,9 +196,13 @@ impl ZenohEeConn {
         }
         // 全 kind joint_state 聚合(M2,13 §5):<prefix>/<kind>/joint_state → q by prefix。
         // 驱动常驻 3D;与上面的 ee 精确订阅并存(这里不过滤,量小:每 robot 100Hz × 数十字节)。
+        // 绊线:同一 key 的 Header.seq 反复回退 ⇒ 疑似**双发布者**(孤儿进程/双 launcher 抢同一前缀,
+        // 3D 表现为两套关节值快速闪烁)。限频告警,帮现场一眼定位(launcher 侧另有孤儿防护拒启)。
         if let Ok(sub) = session.declare_subscriber("hexmeow/**/joint_state").await {
             let c = ctrl.clone();
             tokio::spawn(async move {
+                use std::time::Instant;
+                let mut seq_track: std::collections::HashMap<String, (u64, u32, Instant)> = std::collections::HashMap::new();
                 while let Ok(sample) = sub.recv_async().await {
                     let key = sample.key_expr().as_str();
                     // hexmeow/<cid>/<idx>/<kind>/joint_state → 前 3 段 = robot prefix
@@ -206,6 +210,16 @@ impl ZenohEeConn {
                     if parts.len() != 5 { continue; }
                     let prefix = parts[..3].join("/");
                     if let Ok(js) = pb::JointState::decode(&*sample.payload().to_bytes()) {
+                        if let Some(seq) = js.header.as_ref().map(|h| h.seq) {
+                            let e = seq_track.entry(prefix.clone()).or_insert((0, 0, Instant::now()));
+                            // 回退且不是进程重启(重启=计数器归小,单次;双发布者=高低交替,持续回退)
+                            if seq < e.0 && e.0 - seq < 100_000 { e.1 += 1; } 
+                            e.0 = seq.max(e.0);
+                            if e.1 >= 20 && e.2.elapsed().as_secs() >= 5 {
+                                log::warn!("{prefix}/joint_state seq 反复回退({} 次)——疑似双发布者(孤儿进程?),3D 会两套位形闪烁", e.1);
+                                e.1 = 0; e.2 = Instant::now();
+                            }
+                        }
                         c.scene_joints.lock().unwrap().insert(prefix, js.q);
                     }
                 }

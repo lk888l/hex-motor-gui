@@ -25,8 +25,10 @@ type Slot = {
   group: THREE.Group;               // 网格位安放点
   robot: URDFRobot | null;          // 已加载的 URDF 模型(null=占位盒/加载中)
   assembled: boolean;               // 臂:整机(含 EE)
+  kind: string;
   placeholder: THREE.Mesh | null;
   loading: boolean;
+  lastFetch: number;                // 上次 URDF 拉取时刻(ms;臂未拼装时周期重拉)
   highlighted: boolean;
 };
 
@@ -34,6 +36,7 @@ const HIGHLIGHT = new THREE.Color(0x2a6fbb);
 
 export function MachineViewer({ robots, selected, spacing, height = 340 }: Props) {
   const mountRef = useRef<HTMLDivElement>(null);
+  const controlsRef = useRef<OrbitControls | null>(null);
   const slotsRef = useRef<Map<string, Slot>>(new Map());
   const worldRef = useRef<THREE.Group | null>(null);
   const propsRef = useRef({ robots, selected, spacing });
@@ -53,6 +56,7 @@ export function MachineViewer({ robots, selected, spacing, height = 340 }: Props
     mount.appendChild(renderer.domElement);
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.target.set(0, 0, 0.2);
+    controlsRef.current = controls;
 
     scene.add(new THREE.AmbientLight(0xffffff, 0.75));
     const dir = new THREE.DirectionalLight(0xffffff, 0.8);
@@ -104,11 +108,27 @@ export function MachineViewer({ robots, selected, spacing, height = 340 }: Props
     });
   }
 
+  function disposeRobot(slot: Slot) {
+    if (!slot.robot) return;
+    slot.group.remove(slot.robot);
+    slot.robot.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (m.isMesh) {
+        m.geometry?.dispose();
+        const mat = m.material;
+        if (Array.isArray(mat)) mat.forEach((x) => x.dispose()); else (mat as THREE.Material)?.dispose();
+      }
+    });
+    slot.robot = null;
+  }
+
   function loadUrdfInto(slot: Slot, prefix: string, kindName: string) {
     slot.loading = true;
+    slot.lastFetch = performance.now();
     api.consoleGetUrdf(prefix, kindName).then((u) => {
       slot.loading = false;
       if (!u || !u.xml) return; // 无 URDF:保留占位盒
+      if (slot.robot && slot.assembled === u.assembled) return; // 已有同形态模型,不重建
       const loader = new URDFLoader();
       loader.packages = { xpkg_urdf_firefly_y6: "/urdf", hex_gp80_description: "/urdf/gp80", hex_gr80_description: "/urdf/gr80" };
       (loader as any).loadMeshCb = (
@@ -124,7 +144,9 @@ export function MachineViewer({ robots, selected, spacing, height = 340 }: Props
       };
       try {
         const robot = loader.parse(u.xml);
+        disposeRobot(slot); // 拼装形态升级(臂-only → 整机):替换旧模型
         slot.robot = robot;
+        slot.highlighted = false; // 新模型重新走高亮着色
         slot.assembled = u.assembled;
         if (slot.placeholder) { slot.group.remove(slot.placeholder); slot.placeholder = null; }
         slot.group.add(robot);
@@ -164,7 +186,7 @@ export function MachineViewer({ robots, selected, spacing, height = 340 }: Props
         box.position.z = 0.125;
         group.add(box);
         world.add(group);
-        const slot: Slot = { group, robot: null, assembled: false, placeholder: box, loading: false, highlighted: false };
+        const slot: Slot = { group, robot: null, assembled: false, kind: r.kind_name, placeholder: box, loading: false, lastFetch: 0, highlighted: false };
         slots.set(r.prefix, slot);
         loadUrdfInto(slot, r.prefix, r.kind_name);
       }
@@ -201,6 +223,26 @@ export function MachineViewer({ robots, selected, spacing, height = 340 }: Props
         });
       }
     });
+
+    // 臂未拼装(EE 拼装比 GUI 首查晚就绪)→ 每 5s 重拉 URDF,拼好即替换成整机模型
+    const now = performance.now();
+    visible.forEach((r) => {
+      const s = slots.get(r.prefix);
+      if (s && s.kind === "arm" && !s.assembled && !s.loading && now - s.lastFetch > 5000) {
+        loadUrdfInto(s, r.prefix, r.kind_name);
+      }
+    });
+
+    // 视角跟随:orbit 目标平滑趋向选中 robot(未选中 → 场景原点)
+    const controls = controlsRef.current;
+    if (controls) {
+      const tgt = new THREE.Vector3(0, 0, 0.2);
+      if (selected) {
+        const s = slots.get(selected);
+        if (s) { s.group.getWorldPosition(tgt); tgt.z += 0.25; }
+      }
+      controls.target.lerp(tgt, 0.08); // 平滑跟随,不瞬跳
+    }
 
     // 选中高亮(emissive 着色;ghost/隐藏切换 = M3)
     slots.forEach((s, prefix) => {
