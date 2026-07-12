@@ -459,3 +459,19 @@ export interface ZenohEeState {
   width_max: number;
   fatal: boolean;
 }
+
+/** 场景机器人(M2 常驻 3D;ee_scene 轮询)。 */
+export interface SceneRobot {
+  prefix: string;
+  cid: string;
+  robot_index: string;
+  kind_name: string;
+  model: string;
+  joint_names: string[];
+  q: number[];
+}
+
+export interface ConsoleUrdf {
+  xml: string;
+  assembled: boolean; // 臂已拼 EE(含 ee_mount)
+}

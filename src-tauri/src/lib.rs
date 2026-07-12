@@ -110,6 +110,8 @@ pub fn run() {
             commands::ee_clear_fault,
             commands::ee_get_state,
             commands::ee_release,
+            commands::ee_scene,
+            commands::console_get_urdf,
             commands::arm_connect,
             commands::arm_disconnect,
             commands::arm_discover,

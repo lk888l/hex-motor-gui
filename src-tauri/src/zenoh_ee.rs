@@ -72,6 +72,26 @@ pub struct RobotNode {
     pub model: String,
 }
 
+/// 场景机器人(M2:常驻 3D 的每帧数据;13 §5)。joint_names 来自各 kind 的 description
+/// (base 无关节名 → 空,前端画占位盒);q 来自全 kind joint_state 聚合。
+#[derive(Serialize, Clone)]
+pub struct SceneRobot {
+    pub prefix: String,
+    pub cid: String,
+    pub robot_index: String,
+    pub kind_name: String,
+    pub model: String,
+    pub joint_names: Vec<String>,
+    pub q: Vec<f32>,
+}
+
+/// 通用 URDF 取用结果(先机器人级 <prefix>/urdf——臂的整机拼装;退 <prefix>/<kind>/urdf)。
+#[derive(Serialize, Clone, Default)]
+pub struct ConsoleUrdf {
+    pub xml: String,
+    pub assembled: bool, // 含 ee_mount(臂已拼 EE)→ 同 cid 的被绑 EE 不再单独摆地面(13 §1)
+}
+
 /// 推给前端的状态快照(EePanel 33ms 轮询)。
 #[derive(Serialize, Clone, Default)]
 pub struct ZenohEeState {
@@ -100,6 +120,10 @@ struct Ctrl {
     kp: StdMutex<Option<f32>>,     // None = 发空 kp → 控制器填型号默认增益
     state: StdMutex<ZenohEeState>,
     view_prefix: StdMutex<Option<String>>, // 观察聚焦(读永远开放,与取控解耦,同 arm)
+    // ── M2 场景聚合(13 §5):全 kind joint_state + 发现缓存 + 关节名缓存 ──
+    scene_joints: StdMutex<std::collections::HashMap<String, Vec<f32>>>, // robot prefix → q
+    scene_nodes: StdMutex<Vec<RobotNode>>,                               // 最近一次 discover_all
+    scene_names: StdMutex<std::collections::HashMap<String, Vec<String>>>, // prefix → joint_names
 }
 
 pub struct ZenohEeConn {
@@ -123,6 +147,9 @@ impl ZenohEeConn {
             kp: StdMutex::new(None),
             state: StdMutex::new(ZenohEeState::default()),
             view_prefix: StdMutex::new(None),
+            scene_joints: StdMutex::new(std::collections::HashMap::new()),
+            scene_nodes: StdMutex::new(Vec::new()),
+            scene_names: StdMutex::new(std::collections::HashMap::new()),
         });
 
         // 50Hz 命令流:持有会话且有目标时发单点 JointTrajectory(断流 → 控制器 HOLD 保持抓握,11 §2)。
@@ -163,6 +190,23 @@ impl ZenohEeConn {
                     if let Ok(js) = pb::JointState::decode(&*sample.payload().to_bytes()) {
                         let mut st = c.state.lock().unwrap();
                         st.q = js.q; st.dq = js.dq; st.tau = js.tau_est;
+                    }
+                }
+            });
+        }
+        // 全 kind joint_state 聚合(M2,13 §5):<prefix>/<kind>/joint_state → q by prefix。
+        // 驱动常驻 3D;与上面的 ee 精确订阅并存(这里不过滤,量小:每 robot 100Hz × 数十字节)。
+        if let Ok(sub) = session.declare_subscriber("hexmeow/**/joint_state").await {
+            let c = ctrl.clone();
+            tokio::spawn(async move {
+                while let Ok(sample) = sub.recv_async().await {
+                    let key = sample.key_expr().as_str();
+                    // hexmeow/<cid>/<idx>/<kind>/joint_state → 前 3 段 = robot prefix
+                    let parts: Vec<&str> = key.split('/').collect();
+                    if parts.len() != 5 { continue; }
+                    let prefix = parts[..3].join("/");
+                    if let Ok(js) = pb::JointState::decode(&*sample.payload().to_bytes()) {
+                        c.scene_joints.lock().unwrap().insert(prefix, js.q);
                     }
                 }
             });
@@ -253,7 +297,48 @@ impl ZenohEeConn {
             }
         }
         out.sort_by(|a, b| (&a.cid, &a.robot_index).cmp(&(&b.cid, &b.robot_index)));
+        // M2:缓存节点 + 补关节名(3s 发现节拍上做,scene() 纯读不触网)。
+        for n in &out {
+            let have = self.ctrl.scene_names.lock().unwrap().contains_key(&n.prefix);
+            if have { continue; }
+            let names: Option<Vec<String>> = match n.kind_name.as_str() {
+                "arm" => query_one::<pb::ArmDescription>(&self.session, &format!("{}/arm/description", n.prefix), vec![]).await.map(|d| d.joint_names),
+                "ee" => query_one::<pb::EeDescription>(&self.session, &format!("{}/ee/description", n.prefix), vec![]).await.map(|d| d.joint_names),
+                "lift" => query_one::<pb::LiftDescription>(&self.session, &format!("{}/lift/description", n.prefix), vec![]).await.map(|d| d.joint_names),
+                _ => Some(vec![]), // base 等:无关节名(前端画占位盒)
+            };
+            if let Some(names) = names {
+                self.ctrl.scene_names.lock().unwrap().insert(n.prefix.clone(), names);
+            }
+        }
+        *self.ctrl.scene_nodes.lock().unwrap() = out.clone();
         out
+    }
+
+    /// 场景快照(M2):纯读缓存(30Hz 轮询不触网)。q 缺省空(离线/未发布)。
+    pub fn scene(&self) -> Vec<SceneRobot> {
+        let nodes = self.ctrl.scene_nodes.lock().unwrap().clone();
+        let joints = self.ctrl.scene_joints.lock().unwrap();
+        let names = self.ctrl.scene_names.lock().unwrap();
+        nodes.into_iter().map(|n| SceneRobot {
+            joint_names: names.get(&n.prefix).cloned().unwrap_or_default(),
+            q: joints.get(&n.prefix).cloned().unwrap_or_default(),
+            prefix: n.prefix, cid: n.cid, robot_index: n.robot_index,
+            kind_name: n.kind_name, model: n.model,
+        }).collect()
+    }
+
+    /// 通用 URDF 取用(M2):先机器人级 <prefix>/urdf(臂=整机拼装),退 <prefix>/<kind>/urdf。
+    pub async fn get_urdf(&self, prefix: &str, kind_name: &str) -> Option<ConsoleUrdf> {
+        if let Some(u) = query_one::<pb::UrdfResource>(&self.session, &format!("{prefix}/urdf"), vec![]).await {
+            if !u.xml.is_empty() {
+                let assembled = u.xml.contains("<joint name=\"ee_mount\"");
+                return Some(ConsoleUrdf { xml: u.xml, assembled });
+            }
+        }
+        let u = query_one::<pb::UrdfResource>(&self.session, &format!("{prefix}/{kind_name}/urdf"), vec![]).await?;
+        if u.xml.is_empty() { return None; }
+        Some(ConsoleUrdf { xml: u.xml, assembled: false })
     }
 
     pub async fn acquire(&self, prefix: &str, model: &str) -> anyhow::Result<()> {

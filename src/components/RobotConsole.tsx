@@ -4,13 +4,15 @@
 // 连接复用 zenoh_ee 模块的会话(ee_discover_all 做全量发现,所有 kind 一次拿全)。
 
 import { useCallback, useEffect, useState } from "react";
-import { App as AntdApp, Button, Card, Empty, Input, Layout, Menu, Space, Tag } from "antd";
+import { App as AntdApp, Button, Card, Empty, Input, InputNumber, Layout, Menu, Space, Tag } from "antd";
 import { api } from "../api";
 import type { RobotNode } from "../types";
 import { useI18n } from "../i18n";
 import EePanel from "./EePanel";
 import { ArmPanel } from "./ArmPanel";
 import { ZenohPanel } from "./ZenohPanel";
+import { MachineViewer } from "./MachineViewer";
+import type { SceneRobot } from "../types";
 
 const { Sider, Content } = Layout;
 const DISCOVER_MS = 3000;
@@ -24,6 +26,8 @@ export default function RobotConsole() {
   const [connected, setConnected] = useState(false);
   const [nodes, setNodes] = useState<RobotNode[]>([]);
   const [sel, setSel] = useState<RobotNode | null>(null);
+  const [scene, setScene] = useState<SceneRobot[]>([]);
+  const [spacing, setSpacing] = useState<number>(() => Number(localStorage.getItem("console.spacing")) || 2);
 
   const connect = useCallback(async () => {
     try {
@@ -48,6 +52,15 @@ export default function RobotConsole() {
     tick();
     const iv = setInterval(tick, DISCOVER_MS);
     return () => { stop = true; clearInterval(iv); };
+  }, [connected]);
+
+  // 场景快照轮询(M2 常驻 3D:全 kind 关节聚合,纯读缓存,30Hz)
+  useEffect(() => {
+    if (!connected) { setScene([]); return; }
+    const iv = setInterval(async () => {
+      try { setScene(await api.eeScene()); } catch { /* transient */ }
+    }, 33);
+    return () => clearInterval(iv);
   }, [connected]);
 
   // 断开/切出时释放会话(防呆:面板卸载不残留控制权)
@@ -85,6 +98,13 @@ export default function RobotConsole() {
             : <Button size="small" type="primary" onClick={connect}>{t("consoleConnect")}</Button>}
         </Space.Compact>
         {connected && nodes.length === 0 && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t("consoleSearching")} />}
+        {connected && (
+          <div style={{ fontSize: 12, opacity: 0.75, padding: "2px 4px 6px" }}>
+            {t("consoleSpacing")}
+            <InputNumber size="small" min={0.5} step={0.5} value={spacing} style={{ width: 70, marginLeft: 6 }}
+              onChange={(v) => { const x = v ?? 2; setSpacing(x); localStorage.setItem("console.spacing", String(x)); }} /> m
+          </div>
+        )}
         <Menu
           mode="inline"
           style={{ borderInlineEnd: 0 }}
@@ -94,9 +114,14 @@ export default function RobotConsole() {
           onClick={({ key }) => setSel(nodes.find((n) => n.prefix === key) ?? null)}
         />
       </Sider>
-      <Content style={{ padding: 14, overflow: "auto" }}>
+      <Content style={{ padding: 14, overflow: "auto", display: "flex", flexDirection: "column", gap: 12 }}>
+        {connected && (
+          <Card size="small" styles={{ body: { padding: 6 } }}>
+            <MachineViewer robots={scene} selected={sel?.prefix ?? null} spacing={spacing} height={340} />
+          </Card>
+        )}
         {!sel && (
-          <Empty description={connected ? t("consolePickRobot") : t("consoleConnectFirst")} style={{ marginTop: 80 }} />
+          <Empty description={connected ? t("consolePickRobot") : t("consoleConnectFirst")} style={{ marginTop: connected ? 24 : 80 }} />
         )}
         {sel && sel.kind_name === "ee" && <EePanel key={sel.prefix} node={sel} />}
         {sel && sel.kind_name === "arm" && (

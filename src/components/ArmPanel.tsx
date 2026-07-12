@@ -190,9 +190,12 @@ export function ArmPanel({ embedded }: { embedded?: { endpoint: string; prefix: 
 
       <Card size="small">
         <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-          <div style={{ flex: "1 1 480px", minWidth: 380 }}>
-            <ArmViewer q={st?.q ?? []} gravity={grav} jointNames={st?.joint_names ?? []} previewQ={previewQ} armQuat={armQuat} urdfXml={urdfXml} />
-          </div>
+          {!embedded && (
+            <div style={{ flex: "1 1 480px", minWidth: 380 }}>
+              {/* 控制台托管时不渲自带 viewer:常驻整机 3D 已覆盖(13 §5);独立模式保留全功能(幽灵预览/重力箭头/倾斜) */}
+              <ArmViewer q={st?.q ?? []} gravity={grav} jointNames={st?.joint_names ?? []} previewQ={previewQ} armQuat={armQuat} urdfXml={urdfXml} />
+            </div>
+          )}
           <div style={{ flex: "1 1 320px", minWidth: 300 }}>
             <Space direction="vertical" size={12} style={{ width: "100%" }}>
               <Space wrap>

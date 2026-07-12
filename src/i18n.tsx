@@ -298,6 +298,7 @@ const STRINGS = {
   eeClose: { en: "Close", zh: "闭合" },
   eeDisable: { en: "Disable", zh: "卸力矩" },
   eeAdvanced: { en: "Advanced", zh: "进阶" },
+  consoleSpacing: { en: "Scatter spacing", zh: "散装间距" },
   toolConfig: { en: "Controller Config", zh: "控制器配置" },
   toolConfigDesc: {
     en: "Edit the controller's launch.yaml over Zenoh: validate, save and apply (restarts robots).",

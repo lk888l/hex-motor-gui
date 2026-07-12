@@ -17,7 +17,7 @@ use crate::dto::{LiveStateDto, MotorInfoDto, MotorModeDto, MotorTargetDto};
 use crate::state::AppState;
 use crate::zenoh_base::{BaseInfo, ZenohBaseState, ZenohConn};
 use crate::zenoh_arm::{ArmInfo, ArmUrdf, ZenohArmConn, ZenohArmState};
-use crate::zenoh_ee::{EeInfo, RobotNode, ZenohEeConn, ZenohEeState};
+use crate::zenoh_ee::{ConsoleUrdf, EeInfo, RobotNode, SceneRobot, ZenohEeConn, ZenohEeState};
 use crate::zenoh_config::{
     ConfigGetDto, ConfigSetResult, ConfigValidateResult, ControllerInfoDto, RestartResult, ZenohConfigConn,
 };
@@ -1147,4 +1147,19 @@ pub async fn ee_release(state: State<'_, AppState>) -> CmdResult<()> {
     let g = state.zenoh_ee.lock().await;
     if let Some(c) = g.as_ref() { c.release().await; }
     Ok(())
+}
+
+
+/// 场景快照(M2 常驻 3D,30Hz 轮询):纯读缓存不触网。
+#[tauri::command]
+pub async fn ee_scene(state: State<'_, AppState>) -> CmdResult<Vec<SceneRobot>> {
+    Ok(state.zenoh_ee.lock().await.as_ref().map(|c| c.scene()).unwrap_or_default())
+}
+
+/// 通用 URDF 取用(M2):先 <prefix>/urdf(臂=整机拼装),退 <prefix>/<kind>/urdf。
+#[tauri::command]
+pub async fn console_get_urdf(state: State<'_, AppState>, prefix: String, kind_name: String) -> CmdResult<Option<ConsoleUrdf>> {
+    let g = state.zenoh_ee.lock().await;
+    let c = g.as_ref().ok_or_else(|| "未连接 EE Zenoh".to_string())?;
+    Ok(c.get_urdf(&prefix, &kind_name).await)
 }
