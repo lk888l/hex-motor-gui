@@ -12,6 +12,7 @@ import EePanel from "./EePanel";
 import { ArmPanel } from "./ArmPanel";
 import { ZenohPanel } from "./ZenohPanel";
 import { MachineViewer } from "./MachineViewer";
+import { EeQuickStrip } from "./EeQuickStrip";
 import type { SceneRobot } from "../types";
 
 const { Sider, Content } = Layout;
@@ -27,6 +28,7 @@ export default function RobotConsole() {
   const [nodes, setNodes] = useState<RobotNode[]>([]);
   const [sel, setSel] = useState<RobotNode | null>(null);
   const [scene, setScene] = useState<SceneRobot[]>([]);
+  const [held, setHeld] = useState<Set<string>>(new Set());
   const [spacing, setSpacing] = useState<number>(() => Number(localStorage.getItem("console.spacing")) || 2);
 
   const connect = useCallback(async () => {
@@ -38,8 +40,9 @@ export default function RobotConsole() {
   }, [endpoint, message, t]);
 
   const disconnect = useCallback(async () => {
-    await api.eeDisconnect().catch(() => {});
-    setConnected(false); setNodes([]); setSel(null);
+    await Promise.allSettled([api.armRelease(), api.zenohRelease(), api.eeRelease()]);
+    await Promise.allSettled([api.armDisconnect(), api.zenohDisconnect(), api.eeDisconnect()]);
+    setConnected(false); setNodes([]); setSel(null); setHeld(new Set());
   }, []);
 
   // 周期全量发现(在线/离线以"出现在发现结果里"为准;liveliness 精细三态是后续优化)
@@ -63,8 +66,33 @@ export default function RobotConsole() {
     return () => clearInterval(iv);
   }, [connected]);
 
-  // 断开/切出时释放会话(防呆:面板卸载不残留控制权)
-  useEffect(() => () => { api.eeRelease().catch(() => {}); api.eeDisconnect().catch(() => {}); }, []);
+  // 持有徽标(1Hz):三个后端模块各自的 controlling+prefix → 树上"控制中"(会话跨切换保持后必须可见)
+  useEffect(() => {
+    if (!connected) { setHeld(new Set()); return; }
+    const iv = setInterval(async () => {
+      const hs = new Set<string>();
+      try { const a = await api.armGetState(); if (a.controlling && a.prefix) hs.add(a.prefix); } catch { /* */ }
+      try { const b = await api.zenohGetState(); if (b.controlling && b.prefix) hs.add(b.prefix); } catch { /* */ }
+      try { const e = await api.eeGetState(); if (e.controlling && e.prefix) hs.add(e.prefix); } catch { /* */ }
+      setHeld(hs);
+    }, 1000);
+    return () => clearInterval(iv);
+  }, [connected]);
+
+  const releaseAll = async () => {
+    await Promise.allSettled([api.armRelease(), api.zenohRelease(), api.eeRelease()]);
+    setHeld(new Set());
+  };
+
+  // console 退出 = 统一收口:释放三模块会话 + 断开(embedded 面板卸载不再各自释放——
+  // 会话跨切换保持,切走臂不掉,用户裁决 2026-07-12)
+  useEffect(() => () => {
+    void Promise.allSettled([api.armRelease(), api.zenohRelease(), api.eeRelease()]).then(() => {
+      api.armDisconnect().catch(() => {});
+      api.zenohDisconnect().catch(() => {});
+      api.eeDisconnect().catch(() => {});
+    });
+  }, []);
 
   // 设备树:按 cid 分组
   const byCid = new Map<string, RobotNode[]>();
@@ -82,6 +110,7 @@ export default function RobotConsole() {
           <span>{n.robot_index}</span>
           <Tag color={KIND_COLOR[n.kind_name] ?? "default"} style={{ marginInlineEnd: 0 }}>{n.kind_name}</Tag>
           <span style={{ opacity: 0.65, fontSize: 12 }}>{n.model}</span>
+          {held.has(n.prefix) && <Tag color="green" style={{ marginInlineEnd: 0 }}>控制中</Tag>}
         </Space>
       ),
     })),
@@ -100,6 +129,11 @@ export default function RobotConsole() {
         {connected && nodes.length === 0 && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t("consoleSearching")} />}
         {connected && (
           <div style={{ fontSize: 12, opacity: 0.75, padding: "2px 4px 6px" }}>
+            {held.size > 0 && (
+              <Button size="small" danger style={{ marginBottom: 6, width: "100%" }} onClick={releaseAll}>
+                全部释放({held.size})
+              </Button>
+            )}
             {t("consoleSpacing")}
             <InputNumber size="small" min={0.5} step={0.5} value={spacing} style={{ width: 70, marginLeft: 6 }}
               onChange={(v) => { const x = v ?? 2; setSpacing(x); localStorage.setItem("console.spacing", String(x)); }} /> m
@@ -124,9 +158,13 @@ export default function RobotConsole() {
           <Empty description={connected ? t("consolePickRobot") : t("consoleConnectFirst")} style={{ marginTop: connected ? 24 : 80 }} />
         )}
         {sel && sel.kind_name === "ee" && <EePanel key={sel.prefix} node={sel} />}
-        {sel && sel.kind_name === "arm" && (
-          <ArmPanel key={sel.prefix} embedded={{ endpoint, prefix: sel.prefix, model: sel.model }} />
-        )}
+        {sel && sel.kind_name === "arm" && (() => {
+          const boundEe = nodes.find((n) => n.kind_name === "ee" && n.cid === sel.cid); // 精确 ee↔arm 映射 TODO(多臂时按 machine/EE_KEY)
+          return (<>
+            {boundEe && <EeQuickStrip key={boundEe.prefix} node={boundEe} />}
+            <ArmPanel key={sel.prefix} embedded={{ endpoint, prefix: sel.prefix, model: sel.model }} />
+          </>);
+        })()}
         {sel && sel.kind_name === "base" && (
           <ZenohPanel key={sel.prefix} embedded={{ endpoint, prefix: sel.prefix, model: sel.model }} />
         )}

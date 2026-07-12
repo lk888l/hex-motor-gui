@@ -69,10 +69,10 @@ export function ArmPanel({ embedded }: { embedded?: { endpoint: string; prefix: 
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [embedded?.endpoint, embedded?.prefix]);
-  // 卸载:托管态只释放会话(连接留给控制台复用,切树秒回);独立态整体断开。
+  // 卸载:托管态**什么都不做**——会话跨切换保持(切走臂不掉:重力补偿/保位流照旧,
+  // 用户裁决 2026-07-12);统一释放收口在 RobotConsole 退出/断开。独立态整体断开。
   useEffect(() => () => {
-    if (embedded) { api.armRelease().catch(() => {}); }
-    else { api.armDisconnect().catch(() => {}); }
+    if (!embedded) { api.armDisconnect().catch(() => {}); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   // 选中(手动或自动)某臂即诊断聚焦:订阅其 events/logs + 播种历史(与取控解耦,只读也生效)。

@@ -356,6 +356,12 @@ impl ZenohEeConn {
     }
 
     pub async fn acquire(&self, prefix: &str, model: &str) -> anyhow::Result<()> {
+        // 换机取控:已持有别台 → 先释放旧会话(会话跨切换保持后,换机不再要求手动释放;
+        // 一个模块同时只持一台,同 kind 多持是后续项)。
+        if self.ctrl.session_id.load(Ordering::Relaxed) != 0 {
+            let cur = self.ctrl.prefix.lock().unwrap().clone();
+            if cur.as_deref() != Some(prefix) { self.release().await; }
+        }
         let req = pb::AcquireSessionRequest { client_name: Some("hex-motor-gui".into()), liveliness_key: None };
         let resp: pb::AcquireSessionResponse = query_one(&self.session, &format!("{prefix}/rpc/acquire_session"), enc(&req))
             .await.ok_or_else(|| anyhow!("acquire 无回复"))?;

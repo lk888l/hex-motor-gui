@@ -76,9 +76,9 @@ export function ZenohPanel({ embedded }: { embedded?: { endpoint: string; prefix
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [embedded?.endpoint, embedded?.prefix]);
+  // 托管态卸载不释放(会话跨切换保持,同 ArmPanel);统一收口在 RobotConsole。
   useEffect(() => () => {
-    if (embedded) { api.zenohRelease().catch(() => {}); }
-    else { api.zenohDisconnect().catch(() => {}); }
+    if (!embedded) { api.zenohDisconnect().catch(() => {}); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
