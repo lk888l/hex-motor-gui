@@ -12,6 +12,7 @@ mod dto;
 mod hopea3;
 mod imu;
 mod lift;
+mod lift_commission;
 mod logging;
 mod sdo_client;
 mod smartknob;
@@ -113,6 +114,15 @@ pub fn run() {
             commands::lift_set_velocity,
             commands::lift_renew_velocity,
             commands::lift_set_position,
+            commands::lift_commission_arm,
+            commands::lift_commission_hold,
+            commands::lift_commission_renew,
+            commands::lift_commission_release,
+            commands::lift_commission_disarm,
+            commands::lift_commission_clear_fault,
+            commands::lift_commission_epoch_service,
+            commands::lift_commission_estop,
+            commands::lift_commission_csv,
             commands::smartknob_configs,
             commands::smartknob_start,
             commands::smartknob_stop,

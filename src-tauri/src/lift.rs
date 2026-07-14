@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
+use crate::lift_commission::{CommissionView, Commissioning};
 use can_transport::{CanBus, CanFilter, CanFrame, CanRx, FrameKind};
 use hex_motor::canopen::sdo;
 use hex_motor::cia402::Cia402Manager;
@@ -31,6 +32,7 @@ const MODE_DISABLED: u8 = 0;
 const MODE_POSITION: u8 = 1;
 const MODE_VELOCITY: u8 = 2;
 const MODE_HOMING: u8 = 5;
+const MODE_CONFIG_INVALID: u8 = 0xAF;
 const MODE_CLEAR_FAULT: u8 = 0xFF;
 
 const STATUS_CONFIG_VALID: u8 = 1 << 0;
@@ -113,6 +115,8 @@ pub struct LiftState {
     pub bus_voltage_min_v: f32,
     pub bus_voltage_max_v: f32,
 
+    pub commissioning: CommissionView,
+
     pub last_error: Option<String>,
 }
 
@@ -167,6 +171,7 @@ impl Default for LiftState {
             max_bus_current_a: 0.0,
             bus_voltage_min_v: 0.0,
             bus_voltage_max_v: 0.0,
+            commissioning: CommissionView::default(),
             last_error: None,
         }
     }
@@ -197,6 +202,7 @@ pub struct LiftSession {
     state: Arc<StdMutex<LiftState>>,
     freshness: Arc<StdMutex<TelemetryFreshness>>,
     velocity: Arc<StdMutex<VelocityDemand>>,
+    commissioning: Commissioning,
     accepting_commands: AtomicBool,
     running: Arc<AtomicBool>,
     tasks: StdMutex<Vec<JoinHandle<()>>>,
@@ -253,6 +259,14 @@ impl LiftSession {
         let velocity = Arc::new(StdMutex::new(VelocityDemand::default()));
         let running = Arc::new(AtomicBool::new(true));
         let sdo_gate = Arc::new(AsyncMutex::new(()));
+        let commissioning = Commissioning::start(
+            bus.clone(),
+            node_id,
+            Some(mgr.options().sdo_timeout),
+            sdo_gate.clone(),
+            state.clone(),
+        )
+        .await?;
 
         let session = Self {
             node_id,
@@ -262,6 +276,7 @@ impl LiftSession {
             state,
             freshness,
             velocity,
+            commissioning,
             accepting_commands: AtomicBool::new(true),
             running,
             tasks: StdMutex::new(Vec::new()),
@@ -269,6 +284,7 @@ impl LiftSession {
 
         if let Err(error) = session.refresh_all().await {
             session.running.store(false, Ordering::SeqCst);
+            session.commissioning.shutdown_tasks().await;
             let _ = send_nmt(&session.bus, 0x80, node_id).await;
             return Err(error);
         }
@@ -311,7 +327,9 @@ impl LiftSession {
 
     pub fn state(&self) -> LiftState {
         self.sync_freshness();
-        self.state.lock().unwrap().clone()
+        let mut state = self.state.lock().unwrap().clone();
+        state.commissioning = self.commissioning.view();
+        state
     }
 
     pub async fn refresh(&self) -> anyhow::Result<LiftState> {
@@ -320,9 +338,11 @@ impl LiftSession {
         match self.refresh_live_locked().await {
             Ok(()) => {
                 self.sync_freshness();
-                let mut state = self.state.lock().unwrap();
-                state.last_error = None;
-                Ok(state.clone())
+                {
+                    let mut state = self.state.lock().unwrap();
+                    state.last_error = None;
+                }
+                Ok(self.state())
             }
             Err(error) => {
                 self.record_error(&error);
@@ -344,6 +364,8 @@ impl LiftSession {
         // so an older in-flight Start command cannot win the race.
         if cs != 0x01 {
             self.cancel_velocity();
+            self.commissioning.immediate_stop().await;
+            self.commissioning.clear_on_nmt_exit();
             send_nmt(&self.bus, cs, self.node_id).await?;
             let _ = send_rpdo_velocity(&self.bus, self.node_id, 0.0).await;
         }
@@ -356,8 +378,12 @@ impl LiftSession {
 
     /// Directed emergency-safe disable: NMT Stop first, then clear the mode.
     pub async fn disable(&self) -> anyhow::Result<()> {
-        send_nmt(&self.bus, 0x02, self.node_id).await?;
         self.cancel_velocity();
+        // Cancel the local commissioning stream before any fallible CAN await.
+        // immediate_stop is best-effort: it clears demand even when both its
+        // NMT Stop and RPDO3 zero transmissions fail.
+        self.commissioning.immediate_stop().await;
+        send_nmt(&self.bus, 0x02, self.node_id).await?;
         let _ = send_rpdo_velocity(&self.bus, self.node_id, 0.0).await;
         let _guard = self.sdo_gate.lock().await;
         // Override any older Start/mode command which completed after the
@@ -365,6 +391,7 @@ impl LiftSession {
         send_nmt(&self.bus, 0x02, self.node_id).await?;
         send_nmt(&self.bus, 0x80, self.node_id).await?;
         self.wait_for_nmt(0x7F, HEARTBEAT_TIMEOUT).await?;
+        self.commissioning.confirm_stopped_locked().await?;
         sdo::download_u8(
             &*self.bus,
             self.node_id,
@@ -408,6 +435,11 @@ impl LiftSession {
         let _guard = self.sdo_gate.lock().await;
         self.require_accepting_commands()?;
         self.refresh_live_locked().await?;
+        if self.commissioning.is_available() {
+            anyhow::bail!(
+                "normal fault-clear is disabled by the commissioning ABI; use the ABI2 device-challenge fault-clear"
+            );
+        }
         if self.state.lock().unwrap().status_word & STATUS_FAULT == 0 {
             anyhow::bail!("lift has no latched fault to clear");
         }
@@ -600,6 +632,124 @@ impl LiftSession {
         Ok(())
     }
 
+    pub async fn commission_arm(&self) -> anyhow::Result<u32> {
+        self.cancel_velocity();
+        self.require_accepting_commands()?;
+        let generation = self.commissioning.begin_arm_request()?;
+        let result = async {
+            let _ = send_rpdo_velocity(&self.bus, self.node_id, 0.0).await;
+            let _guard = self.sdo_gate.lock().await;
+            self.require_accepting_commands()?;
+            self.refresh_live_locked().await?;
+            {
+                let state = self.state.lock().unwrap();
+                if state.mode_command != MODE_DISABLED
+                    || !matches!(state.mode_display, MODE_DISABLED | MODE_CONFIG_INVALID)
+                {
+                    anyhow::bail!(
+                        "commissioning requires normal motion mode to be disabled (command=0x{:02X}, display=0x{:02X})",
+                        state.mode_command,
+                        state.mode_display
+                    );
+                }
+            }
+            self.commissioning.arm(generation).await
+        }
+        .await;
+
+        match result {
+            Ok(session) => {
+                self.clear_error();
+                Ok(session)
+            }
+            Err(error) => {
+                self.commissioning.abort_arm_request(generation);
+                self.record_error(&error);
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn commission_hold(&self, duty_permille: i16) -> anyhow::Result<u16> {
+        self.require_accepting_commands()?;
+        self.commissioning.hold(duty_permille).await
+    }
+
+    pub fn renew_commission_lease(&self) -> anyhow::Result<()> {
+        self.require_accepting_commands()?;
+        self.commissioning.renew_operator_lease()
+    }
+
+    /// Zero is an always-permitted deadman release and does not wait for SDO.
+    pub async fn commission_release(&self) -> anyhow::Result<()> {
+        self.commissioning.release().await
+    }
+
+    pub async fn commission_disarm(&self) -> anyhow::Result<()> {
+        match self.commissioning.disarm(&self.sdo_gate).await {
+            Ok(()) => {
+                self.clear_error();
+                Ok(())
+            }
+            Err(error) => {
+                self.record_error(&error);
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn commission_clear_fault(&self) -> anyhow::Result<()> {
+        self.cancel_velocity();
+        self.require_accepting_commands()?;
+        match self.commissioning.clear_fault(&self.sdo_gate).await {
+            Ok(()) => {
+                self.clear_error();
+                Ok(())
+            }
+            Err(error) => {
+                self.record_error(&error);
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn commission_epoch_service(&self, motor_disconnected: bool) -> anyhow::Result<()> {
+        self.cancel_velocity();
+        self.require_accepting_commands()?;
+        match self
+            .commissioning
+            .epoch_service(&self.sdo_gate, motor_disconnected)
+            .await
+        {
+            Ok(()) => {
+                self.clear_error();
+                Ok(())
+            }
+            Err(error) => {
+                self.record_error(&error);
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn commission_estop(&self) -> anyhow::Result<()> {
+        self.cancel_velocity();
+        match self.commissioning.emergency_stop(&self.sdo_gate).await {
+            Ok(()) => {
+                self.clear_error();
+                Ok(())
+            }
+            Err(error) => {
+                self.record_error(&error);
+                Err(error)
+            }
+        }
+    }
+
+    pub fn commission_csv(&self) -> anyhow::Result<String> {
+        self.commissioning.csv()
+    }
+
     /// Stop motion, cancel autonomous goals, and leave the node safely Pre-op.
     /// Success means a Pre-operational heartbeat and a Disabled command
     /// readback were both observed; on failure the session remains available
@@ -607,6 +757,7 @@ impl LiftSession {
     pub async fn stop(&self) -> anyhow::Result<()> {
         self.accepting_commands.store(false, Ordering::SeqCst);
         self.cancel_velocity();
+        self.commissioning.immediate_stop().await;
         // NMT Stop is deliberately the first awaited bus action and does not
         // depend on SDO health or the normal command serialization gate.
         let _ = send_nmt(&self.bus, 0x02, self.node_id).await;
@@ -620,6 +771,7 @@ impl LiftSession {
             let _ = send_rpdo_velocity(&self.bus, self.node_id, 0.0).await;
             send_nmt(&self.bus, 0x80, self.node_id).await?;
             self.wait_for_nmt(0x7F, HEARTBEAT_TIMEOUT).await?;
+            self.commissioning.confirm_stopped_locked().await?;
             sdo::download_u8(
                 &*self.bus,
                 self.node_id,
@@ -657,6 +809,7 @@ impl LiftSession {
             task.abort();
             let _ = task.await;
         }
+        self.commissioning.shutdown_tasks().await;
         let mut state = self.state.lock().unwrap();
         state.running = false;
         state.last_error = None;
@@ -683,6 +836,7 @@ impl LiftSession {
 
         let device_name = sdo::upload_string(bus, nid, 0x1008, 0, timeout).await?;
         let firmware_version = sdo::upload_string(bus, nid, 0x100A, 0, timeout).await?;
+        self.commissioning.probe_identity(&device_name).await?;
         let nameplate_kind = sdo::upload_u8(bus, nid, 0x5F00, 1, timeout).await?;
         let mut model_raw = Vec::with_capacity(32);
         for sub in 1..=4 {
@@ -805,30 +959,36 @@ impl LiftSession {
         let ina_sample_age_ms = sdo::upload_u16(bus, nid, DIAGNOSTICS, 10, timeout).await?;
         let ina_fault_count = sdo::upload_u32(bus, nid, DIAGNOSTICS, 11, timeout).await?;
 
-        let mut state = self.state.lock().unwrap();
-        state.mode_command = mode_command;
-        state.mode_display = mode_display;
-        state.status_word = status_word;
-        state.detailed_fault = detailed_fault;
-        state.actual_position_m = actual_position_m;
-        state.actual_velocity_mps = actual_velocity_mps;
-        state.sample_timestamp_us = sample_timestamp_us;
-        state.bus_voltage_v = bus_voltage_v;
-        state.bus_current_a = bus_current_a;
-        state.bus_power_w = bus_power_w;
-        state.ina_temperature_c = ina_temperature_c;
-        state.encoder_count = encoder_count;
-        state.duty_command_permille = duty_command_permille;
-        state.control_loop_hz = control_loop_hz;
-        state.sensor_status = sensor_status;
-        state.ina_diag = ina_diag;
-        state.ina_sample_age_ms = ina_sample_age_ms;
-        state.ina_fault_count = ina_fault_count;
+        {
+            let mut state = self.state.lock().unwrap();
+            state.mode_command = mode_command;
+            state.mode_display = mode_display;
+            state.status_word = status_word;
+            state.detailed_fault = detailed_fault;
+            state.actual_position_m = actual_position_m;
+            state.actual_velocity_mps = actual_velocity_mps;
+            state.sample_timestamp_us = sample_timestamp_us;
+            state.bus_voltage_v = bus_voltage_v;
+            state.bus_current_a = bus_current_a;
+            state.bus_power_w = bus_power_w;
+            state.ina_temperature_c = ina_temperature_c;
+            state.encoder_count = encoder_count;
+            state.duty_command_permille = duty_command_permille;
+            state.control_loop_hz = control_loop_hz;
+            state.sensor_status = sensor_status;
+            state.ina_diag = ina_diag;
+            state.ina_sample_age_ms = ina_sample_age_ms;
+            state.ina_fault_count = ina_fault_count;
+        }
+        self.commissioning.refresh_locked().await?;
         Ok(())
     }
 
     fn require_motion_gate(&self, needs_homed: bool) -> anyhow::Result<()> {
         self.sync_freshness();
+        if self.commissioning.is_available() {
+            anyhow::bail!("normal motion is disabled by the isolated commissioning firmware ABI");
+        }
         let state = self.state.lock().unwrap();
         if !state.online {
             anyhow::bail!("lift heartbeat is stale");

@@ -10,9 +10,14 @@ import {
   Tag,
   Typography,
 } from "antd";
+import {
+  LIFT_COMMISSION_DEVICE_NAME,
+  isLiftCommissionAbi2,
+} from "../liftCommissionProtocol";
 import { api, errMsg } from "../api";
 import { useI18n, type I18nKey } from "../i18n";
 import type { LiftState } from "../types";
+import { LiftCommissioningCard } from "./LiftCommissioningCard";
 import "./LiftPanel.css";
 
 const POLL_MS = 100;
@@ -310,6 +315,17 @@ export function LiftPanel({ connected }: { connected: boolean }) {
   const motionBlockers = [...commonBlockers];
   if (state != null && !homed) motionBlockers.push("liftBlockHomed");
 
+  const commissionImage =
+    state?.device_name === LIFT_COMMISSION_DEVICE_NAME ||
+    state?.commissioning.available === true;
+  const commissionAvailable =
+    state != null &&
+    isLiftCommissionAbi2(
+      state.device_name,
+      state.commissioning.abi,
+      state.commissioning.available
+    );
+
   const canHome =
     connected &&
     attached &&
@@ -320,6 +336,7 @@ export function LiftPanel({ connected }: { connected: boolean }) {
     sensorHealthy &&
     operational &&
     configValid &&
+    !commissionImage &&
     !faulted;
   const canMove = canHome && homed;
 
@@ -585,6 +602,15 @@ export function LiftPanel({ connected }: { connected: boolean }) {
             />
           )}
 
+          {commissionAvailable && (
+            <LiftCommissioningCard
+              state={state}
+              connected={connected}
+              attached={attached}
+              globalBusy={commandBusy}
+            />
+          )}
+
           <div className="lift-summary-grid">
             <Card title={t("liftIdentity")} size="small">
               <MetricGrid
@@ -743,6 +769,7 @@ export function LiftPanel({ connected }: { connected: boolean }) {
                   <Button
                     disabled={
                       !connected ||
+                      commissionImage ||
                       !attached ||
                       !state.online ||
                       !faulted ||

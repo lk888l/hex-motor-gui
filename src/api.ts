@@ -70,6 +70,18 @@ export const api = {
   liftRenewVelocity: () => invoke<void>("lift_renew_velocity"),
   liftSetPosition: (positionM: number) =>
     invoke<void>("lift_set_position", { positionM }),
+  liftCommissionArm: () => invoke<number>("lift_commission_arm"),
+  liftCommissionClearFault: () =>
+    invoke<void>("lift_commission_clear_fault"),
+  liftCommissionEpochService: (motorDisconnected: boolean) =>
+    invoke<void>("lift_commission_epoch_service", { motorDisconnected }),
+  liftCommissionHold: (dutyPermille: number) =>
+    invoke<number>("lift_commission_hold", { dutyPermille }),
+  liftCommissionRenew: () => invoke<void>("lift_commission_renew"),
+  liftCommissionRelease: () => invoke<void>("lift_commission_release"),
+  liftCommissionDisarm: () => invoke<void>("lift_commission_disarm"),
+  liftCommissionEstop: () => invoke<void>("lift_commission_estop"),
+  liftCommissionCsv: () => invoke<string>("lift_commission_csv"),
 
   // SmartKnob Robot Application
   smartknobConfigs: () => invoke<KnobConfig[]>("smartknob_configs"),

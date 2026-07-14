@@ -212,6 +212,119 @@
   margin-top: 12px;
 }
 
+.lift-commission {
+  border: 1px solid rgba(245, 158, 11, 0.72);
+  background:
+    linear-gradient(135deg, rgba(120, 53, 15, 0.22), rgba(17, 24, 39, 0.88));
+  box-shadow: 0 12px 36px rgba(120, 53, 15, 0.18);
+}
+
+.lift-commission--armed {
+  border-color: rgba(249, 115, 22, 0.92);
+  box-shadow:
+    0 0 0 1px rgba(249, 115, 22, 0.22),
+    0 14px 38px rgba(154, 52, 18, 0.24);
+}
+
+.lift-commission--fault {
+  border-color: rgba(239, 68, 68, 0.92);
+  box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.25);
+}
+
+.lift-commission .ant-card-head-title {
+  color: #fbbf24;
+  font-size: 17px;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+}
+
+.lift-commission__body,
+.lift-commission__hold,
+.lift-commission__live {
+  display: grid;
+  gap: 12px;
+}
+
+.lift-commission__actions {
+  display: grid;
+  grid-template-columns: minmax(180px, 260px) minmax(260px, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  padding: 14px;
+  border: 1px solid rgba(251, 191, 36, 0.22);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.16);
+}
+
+.lift-commission__service,
+.lift-commission__fault-actions {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 8px;
+}
+
+.lift-commission__service {
+  border: 1px solid rgba(245, 158, 11, 0.46);
+  background: rgba(120, 53, 15, 0.16);
+}
+
+.lift-commission__fault-actions {
+  border: 1px solid rgba(239, 68, 68, 0.5);
+  background: rgba(127, 29, 29, 0.16);
+}
+
+.lift-commission__service-actions {
+  justify-content: space-between;
+}
+
+.lift-commission__service .ant-checkbox-wrapper {
+  color: #fde68a;
+  font-weight: 650;
+}
+
+.lift-commission__direction.ant-btn {
+  min-height: 82px;
+  color: #fff7ed;
+  border-color: rgba(251, 146, 60, 0.7);
+  background: rgba(194, 65, 12, 0.2);
+  font-size: 20px;
+  letter-spacing: 0.08em;
+}
+
+.lift-commission__direction.ant-btn:not(:disabled):hover {
+  color: #fff;
+  border-color: #fb923c;
+  background: rgba(234, 88, 12, 0.34);
+}
+
+.lift-commission__estop.ant-btn {
+  min-height: 60px;
+  border-color: #ff7070;
+  background: #b91c1c;
+  font-size: 17px;
+  font-weight: 900;
+  letter-spacing: 0.05em;
+}
+
+.lift-commission__estop.ant-btn:not(:disabled):hover {
+  border-color: #fca5a5;
+  background: #dc2626;
+}
+
+.lift-commission__metrics {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.lift-commission__csv {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 4px;
+}
+
 @media (max-width: 1180px) {
   .lift-summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -225,7 +338,8 @@
     grid-template-columns: minmax(300px, 0.75fr) minmax(400px, 1.25fr);
   }
 
-  .lift-metrics--large {
+  .lift-metrics--large,
+  .lift-commission__metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
@@ -233,7 +347,9 @@
 @media (max-width: 820px) {
   .lift-session .ant-card-body,
   .lift-summary-grid,
-  .lift-main-grid {
+  .lift-main-grid,
+  .lift-commission__actions,
+  .lift-commission__metrics {
     grid-template-columns: 1fr;
   }
 

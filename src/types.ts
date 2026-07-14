@@ -124,6 +124,45 @@ export interface Hopea3State {
   running: boolean;
 }
 
+export interface LiftCommissionView {
+  available: boolean;
+  abi: number;
+  active_session: number;
+  boot_epoch: number;
+  challenge: number;
+  challenge_kind: number;
+  expected_pulse_id: number;
+  encoder_sign: number;
+  ina_fingerprint_mismatch: number;
+  epoch_status: number;
+  state: number;
+  flags: number;
+  requested_duty_permille: number;
+  applied_duty_permille: number;
+  hard_cap_permille: number;
+  lease_ms: number;
+  max_pulse_ms: number;
+  pulse_elapsed_ms: number;
+  command_age_ms: number;
+  stop_reason: number;
+  soft_current_a: number;
+  active_pulse: number;
+  energized_ms: number;
+  foldback_cap_permille: number;
+  overcurrent_ms: number;
+  gap_remaining_ms: number;
+  hard_current_a: number;
+  tpdo3_fresh: boolean;
+  tpdo4_fresh: boolean;
+  pair_fresh: boolean;
+  tick: number;
+  raw_count: number;
+  current_a: number;
+  host_remaining_ms: number;
+  buffered_samples: number;
+  dropped_pairs: number;
+}
+
 // ── Lift raw-CAN application (mirrors lift::LiftState) ──
 export interface LiftState {
   running: boolean;
@@ -174,6 +213,7 @@ export interface LiftState {
   max_bus_current_a: number;
   bus_voltage_min_v: number;
   bus_voltage_max_v: number;
+  commissioning: LiftCommissionView;
   last_error: string | null;
 }
 
