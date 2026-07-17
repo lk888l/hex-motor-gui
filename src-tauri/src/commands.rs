@@ -20,8 +20,15 @@ use crate::unified_smartknob::{
     SmartKnobProfile, SmartKnobStartRequest, SmartKnobTarget, SmartKnobTelemetry, SmartKnobTuning,
     UnifiedSmartKnobState,
 };
-use crate::zenoh_arm::{ArmInfo, ZenohArmConn, ZenohArmState};
+use crate::zenoh_arm::{ArmInfo, ArmUrdf, ZenohArmConn, ZenohArmState};
 use crate::zenoh_base::{BaseInfo, ZenohBaseState, ZenohConn};
+use crate::zenoh_config::{
+    ConfigGetDto, ConfigSetResult, ConfigValidateResult, ControllerInfoDto, RestartResult,
+    ZenohConfigConn,
+};
+use crate::zenoh_ee::{
+    ConsoleUrdf, EeInfo, MountEdgeDto, RobotNode, SceneRobot, ZenohEeConn, ZenohEeState,
+};
 
 /// Anything we hand back to the frontend.
 type CmdResult<T> = Result<T, String>;
@@ -35,6 +42,36 @@ async fn manager(state: &AppState) -> CmdResult<Arc<Cia402Manager>> {
         .manager()
         .await
         .ok_or_else(|| "not connected: call connect() first".to_string())
+}
+
+/// Clone the active lift session without keeping the application-state mutex
+/// across CAN I/O. In particular, directed NMT Stop/zero commands must not
+/// wait behind a slow SDO diagnostics refresh.
+async fn lift_session(state: &AppState) -> CmdResult<Arc<crate::lift::LiftSession>> {
+    state
+        .lift
+        .lock()
+        .await
+        .clone()
+        .ok_or_else(|| "lift is not attached".to_string())
+}
+
+/// Keep the handle registered until the device has acknowledged the safe
+/// detach sequence. A failed CAN stop must remain visible and retryable.
+pub(crate) async fn stop_lift_session(state: &AppState) -> CmdResult<()> {
+    let app = match state.lift.lock().await.clone() {
+        Some(app) => app,
+        None => return Ok(()),
+    };
+    app.stop().await.map_err(err)?;
+    let mut guard = state.lift.lock().await;
+    if guard
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, &app))
+    {
+        guard.take();
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -68,6 +105,10 @@ pub async fn connect(
 
 #[tauri::command]
 pub async fn disconnect(state: State<'_, AppState>) -> CmdResult<()> {
+    // Preserve the retryable lift handle until its confirmed safe detach has
+    // completed. A manual disconnect reports failure instead of silently
+    // dropping the only handle that can retry the stop.
+    stop_lift_session(&state).await?;
     disconnect_state(&state).await;
     Ok(())
 }
@@ -1337,6 +1378,17 @@ pub async fn arm_get_state(state: State<'_, AppState>) -> CmdResult<ZenohArmStat
         .unwrap_or_default())
 }
 
+/// 取某臂 URDF 供前端 3D 渲染(选中即拉,与取控解耦)。优先机器人级整机(arm+EE),退到臂-only;无则回 None。
+#[tauri::command]
+pub async fn arm_get_urdf(
+    state: State<'_, AppState>,
+    prefix: String,
+) -> CmdResult<Option<ArmUrdf>> {
+    let g = state.zenoh_arm.lock().await;
+    let c = g.as_ref().ok_or_else(|| "未连接 Arm Zenoh".to_string())?;
+    Ok(c.get_urdf(&prefix).await)
+}
+
 #[tauri::command]
 pub async fn arm_release(state: State<'_, AppState>) -> CmdResult<()> {
     if let Some(c) = state.zenoh_arm.lock().await.as_ref() {
@@ -1391,4 +1443,386 @@ pub async fn arm_clear_fault(state: State<'_, AppState>) -> CmdResult<()> {
     let g = state.zenoh_arm.lock().await;
     let c = g.as_ref().ok_or_else(|| "未连接 Arm Zenoh".to_string())?;
     c.clear_fault().await.map_err(err)
+}
+
+// ───────────────────────── Controller Config(Zenoh)─────────────────────────
+
+/// 连接到控制器网络(config 面板专用 Session)。`connect` 空=仅多播发现。
+#[tauri::command]
+pub async fn config_connect(state: State<'_, AppState>, connect: String) -> CmdResult<()> {
+    let mut g = state.config.lock().await;
+    if g.is_some() {
+        return Err("Config Zenoh 已连接;先 disconnect".into());
+    }
+    *g = Some(ZenohConfigConn::open(&connect).await.map_err(err)?);
+    log::info!("Config Zenoh 已连接: {connect}");
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn config_disconnect(state: State<'_, AppState>) -> CmdResult<()> {
+    state.config.lock().await.take();
+    Ok(())
+}
+
+/// 发现网络里的控制器(走 `<cid>/info`;恢复模式下零 robot 也可发现)。
+#[tauri::command]
+pub async fn config_discover(state: State<'_, AppState>) -> CmdResult<Vec<ControllerInfoDto>> {
+    let g = state.config.lock().await;
+    let c = g
+        .as_ref()
+        .ok_or_else(|| "未连接 Config Zenoh".to_string())?;
+    Ok(c.discover().await)
+}
+
+/// 读取某控制器的 launch.yaml(含 sha256 / path / mtime / schema_version / recovery_mode)。
+#[tauri::command]
+pub async fn config_get(state: State<'_, AppState>, cid: String) -> CmdResult<ConfigGetDto> {
+    let g = state.config.lock().await;
+    let c = g
+        .as_ref()
+        .ok_or_else(|| "未连接 Config Zenoh".to_string())?;
+    c.get(&cid).await.map_err(err)
+}
+
+/// 干跑校验(errors + 语义红线 critical_changes)。不落盘。
+#[tauri::command]
+pub async fn config_validate(
+    state: State<'_, AppState>,
+    cid: String,
+    yaml: String,
+) -> CmdResult<ConfigValidateResult> {
+    let g = state.config.lock().await;
+    let c = g
+        .as_ref()
+        .ok_or_else(|| "未连接 Config Zenoh".to_string())?;
+    c.validate(&cid, &yaml).await.map_err(err)
+}
+
+/// 写入配置(乐观锁 expectSha256;apply=true 立即生效;有红线时 confirm 必须 true)。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn config_set(
+    state: State<'_, AppState>,
+    cid: String,
+    yaml: String,
+    expect_sha256: String,
+    apply: bool,
+    confirm: bool,
+    force: bool,
+) -> CmdResult<ConfigSetResult> {
+    let g = state.config.lock().await;
+    let c = g
+        .as_ref()
+        .ok_or_else(|| "未连接 Config Zenoh".to_string())?;
+    c.set(&cid, &yaml, &expect_sha256, apply, confirm, force)
+        .await
+        .map_err(err)
+}
+
+/// 单独"应用":重启该控制器全部子进程(confirm 复述后为 true;force 越过会话检查)。
+#[tauri::command]
+pub async fn config_restart(
+    state: State<'_, AppState>,
+    cid: String,
+    confirm: bool,
+    force: bool,
+) -> CmdResult<RestartResult> {
+    let g = state.config.lock().await;
+    let c = g
+        .as_ref()
+        .ok_or_else(|| "未连接 Config Zenoh".to_string())?;
+    c.restart(&cid, confirm, force).await.map_err(err)
+}
+
+// ───────────────────────── EE(Zenoh)─────────────────────────
+// 镜像 arm_* 的形状(commands 仅解锁转发,逻辑在 zenoh_ee.rs)。机器人控制台
+// 共用本连接的 ee_discover_all 做设备树全量发现。
+
+#[tauri::command]
+pub async fn ee_connect(state: State<'_, AppState>, connect: String) -> CmdResult<()> {
+    let mut g = state.zenoh_ee.lock().await;
+    if g.is_some() {
+        return Err("EE Zenoh 已连接;先 disconnect".into());
+    }
+    *g = Some(ZenohEeConn::open(&connect).await.map_err(err)?);
+    log::info!("EE Zenoh 已连接: {connect}");
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn ee_disconnect(state: State<'_, AppState>) -> CmdResult<()> {
+    if let Some(c) = state.zenoh_ee.lock().await.take() {
+        c.release().await;
+    }
+    Ok(())
+}
+
+/// 发现网络里的 EE(kind==EE),含 ee/description 细节(限位/OpeningMap)。
+#[tauri::command]
+pub async fn ee_discover(state: State<'_, AppState>) -> CmdResult<Vec<EeInfo>> {
+    let g = state.zenoh_ee.lock().await;
+    let c = g.as_ref().ok_or_else(|| "未连接 EE Zenoh".to_string())?;
+    Ok(c.discover().await)
+}
+
+/// 全量发现(机器人控制台设备树):所有 kind 的 robot,按 cid 分组由前端完成。
+#[tauri::command]
+pub async fn ee_discover_all(state: State<'_, AppState>) -> CmdResult<Vec<RobotNode>> {
+    let g = state.zenoh_ee.lock().await;
+    let c = g.as_ref().ok_or_else(|| "未连接 EE Zenoh".to_string())?;
+    Ok(c.discover_all().await)
+}
+
+#[tauri::command]
+pub async fn ee_acquire(
+    state: State<'_, AppState>,
+    prefix: String,
+    model: String,
+) -> CmdResult<()> {
+    let g = state.zenoh_ee.lock().await;
+    let c = g.as_ref().ok_or_else(|| "未连接 EE Zenoh".to_string())?;
+    c.acquire(&prefix, &model).await.map_err(err)
+}
+
+/// 观察聚焦(只读,与取控解耦):设备树选中即观察。
+#[tauri::command]
+pub async fn ee_set_focus(state: State<'_, AppState>, prefix: String) -> CmdResult<()> {
+    let g = state.zenoh_ee.lock().await;
+    let c = g.as_ref().ok_or_else(|| "未连接 EE Zenoh".to_string())?;
+    c.set_focus(&prefix).await;
+    Ok(())
+}
+
+/// 开合到 q(进 ACTIVE + 50Hz 流)。kp 省略 → 控制器默认增益;小 kp = 柔顺/限力抓取。
+#[tauri::command]
+pub async fn ee_goto(state: State<'_, AppState>, q: f32, kp: Option<f32>) -> CmdResult<()> {
+    let g = state.zenoh_ee.lock().await;
+    let c = g.as_ref().ok_or_else(|| "未连接 EE Zenoh".to_string())?;
+    c.goto(q, kp).await.map_err(err)
+}
+
+/// 设 OperatingMode(2=ACTIVE,1=DISABLED;EE v1 只支持这两个)。
+#[tauri::command]
+pub async fn ee_set_mode(state: State<'_, AppState>, mode: i32) -> CmdResult<()> {
+    let g = state.zenoh_ee.lock().await;
+    let c = g.as_ref().ok_or_else(|| "未连接 EE Zenoh".to_string())?;
+    c.set_mode(mode).await.map_err(err)
+}
+
+/// estop 期间姿态(1=保位 2=松开 3=抗拒张开;11 §10)。
+#[tauri::command]
+pub async fn ee_set_estop_behavior(state: State<'_, AppState>, behavior: i32) -> CmdResult<()> {
+    let g = state.zenoh_ee.lock().await;
+    let c = g.as_ref().ok_or_else(|| "未连接 EE Zenoh".to_string())?;
+    c.set_estop_behavior(behavior).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn ee_clear_fault(state: State<'_, AppState>) -> CmdResult<()> {
+    let g = state.zenoh_ee.lock().await;
+    let c = g.as_ref().ok_or_else(|| "未连接 EE Zenoh".to_string())?;
+    c.clear_fault().await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn ee_get_state(state: State<'_, AppState>) -> CmdResult<ZenohEeState> {
+    Ok(state
+        .zenoh_ee
+        .lock()
+        .await
+        .as_ref()
+        .map(|c| c.state())
+        .unwrap_or_default())
+}
+
+#[tauri::command]
+pub async fn ee_release(state: State<'_, AppState>) -> CmdResult<()> {
+    let g = state.zenoh_ee.lock().await;
+    if let Some(c) = g.as_ref() {
+        c.release().await;
+    }
+    Ok(())
+}
+
+/// 场景快照(M2 常驻 3D,30Hz 轮询):纯读缓存不触网。
+#[tauri::command]
+pub async fn ee_scene(state: State<'_, AppState>) -> CmdResult<Vec<SceneRobot>> {
+    Ok(state
+        .zenoh_ee
+        .lock()
+        .await
+        .as_ref()
+        .map(|c| c.scene())
+        .unwrap_or_default())
+}
+
+/// 通用 URDF 取用(M2):先 <prefix>/urdf(臂=整机拼装),退 <prefix>/<kind>/urdf。
+#[tauri::command]
+pub async fn console_get_urdf(
+    state: State<'_, AppState>,
+    prefix: String,
+    kind_name: String,
+) -> CmdResult<Option<ConsoleUrdf>> {
+    let g = state.zenoh_ee.lock().await;
+    let c = g.as_ref().ok_or_else(|| "未连接 EE Zenoh".to_string())?;
+    Ok(c.get_urdf(&prefix, &kind_name).await)
+}
+
+/// 整机挂载边(M3):cid → MountEdge 列表(随 3s 发现节拍刷新;无 machine 段 = 不含该 cid)。
+#[tauri::command]
+pub async fn ee_machines(
+    state: State<'_, AppState>,
+) -> CmdResult<std::collections::HashMap<String, Vec<MountEdgeDto>>> {
+    Ok(state
+        .zenoh_ee
+        .lock()
+        .await
+        .as_ref()
+        .map(|c| c.machines())
+        .unwrap_or_default())
+}
+
+// ───────────────────────── Lift direct-CAN application ──────────────────────
+
+/// Attach to one lift node and read its identity/nameplate/configuration.
+/// This deliberately does not change NMT state or arm motion.
+#[tauri::command]
+pub async fn lift_start(state: State<'_, AppState>, nid: u8) -> CmdResult<crate::lift::LiftState> {
+    let mgr = manager(&state).await?;
+    let mut guard = state.lift.lock().await;
+    if guard.is_some() {
+        return Err("a lift session is already attached; detach it first".into());
+    }
+    let app = crate::lift::LiftSession::start(mgr, nid)
+        .await
+        .map_err(err)?;
+    let snapshot = app.state();
+    *guard = Some(Arc::new(app));
+    Ok(snapshot)
+}
+
+/// Safe detach: directed NMT Stop, then confirmed Pre-operational + Disabled.
+#[tauri::command]
+pub async fn lift_stop(state: State<'_, AppState>) -> CmdResult<()> {
+    stop_lift_session(&state).await
+}
+
+#[tauri::command]
+pub async fn lift_get_state(state: State<'_, AppState>) -> CmdResult<crate::lift::LiftState> {
+    let app = state.lift.lock().await.clone();
+    Ok(app.map(|session| session.state()).unwrap_or_default())
+}
+
+/// Refresh non-PDO diagnostics over serialized SDO transactions.
+#[tauri::command]
+pub async fn lift_refresh(state: State<'_, AppState>) -> CmdResult<crate::lift::LiftState> {
+    let app = lift_session(&state).await?;
+    app.refresh().await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn lift_set_nmt(state: State<'_, AppState>, command: String) -> CmdResult<()> {
+    let app = lift_session(&state).await?;
+    app.set_nmt(&command).await.map_err(err)
+}
+
+/// Immediate safe action. This always sends directed NMT Stop before the SDO
+/// Disabled request, so it remains useful if the SDO path is unhealthy.
+#[tauri::command]
+pub async fn lift_disable(state: State<'_, AppState>) -> CmdResult<()> {
+    let app = lift_session(&state).await?;
+    app.disable().await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn lift_home(state: State<'_, AppState>) -> CmdResult<()> {
+    let app = lift_session(&state).await?;
+    app.home().await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn lift_clear_fault(state: State<'_, AppState>) -> CmdResult<()> {
+    let app = lift_session(&state).await?;
+    app.clear_fault().await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn lift_set_velocity(state: State<'_, AppState>, velocity_mps: f32) -> CmdResult<()> {
+    let app = lift_session(&state).await?;
+    app.set_velocity(velocity_mps).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn lift_renew_velocity(state: State<'_, AppState>) -> CmdResult<()> {
+    let app = lift_session(&state).await?;
+    app.renew_velocity_lease().map_err(err)
+}
+
+#[tauri::command]
+pub async fn lift_set_position(state: State<'_, AppState>, position_m: f32) -> CmdResult<()> {
+    let app = lift_session(&state).await?;
+    app.set_position(position_m).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn lift_commission_arm(state: State<'_, AppState>) -> CmdResult<u32> {
+    let app = lift_session(&state).await?;
+    app.commission_arm().await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn lift_commission_hold(
+    state: State<'_, AppState>,
+    duty_permille: i16,
+) -> CmdResult<u16> {
+    let app = lift_session(&state).await?;
+    app.commission_hold(duty_permille).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn lift_commission_renew(state: State<'_, AppState>) -> CmdResult<()> {
+    let app = lift_session(&state).await?;
+    app.renew_commission_lease().map_err(err)
+}
+
+#[tauri::command]
+pub async fn lift_commission_release(state: State<'_, AppState>) -> CmdResult<()> {
+    let app = lift_session(&state).await?;
+    app.commission_release().await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn lift_commission_disarm(state: State<'_, AppState>) -> CmdResult<()> {
+    let app = lift_session(&state).await?;
+    app.commission_disarm().await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn lift_commission_clear_fault(state: State<'_, AppState>) -> CmdResult<()> {
+    let app = lift_session(&state).await?;
+    app.commission_clear_fault().await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn lift_commission_epoch_service(
+    state: State<'_, AppState>,
+    motor_disconnected: bool,
+) -> CmdResult<()> {
+    let app = lift_session(&state).await?;
+    app.commission_epoch_service(motor_disconnected)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn lift_commission_estop(state: State<'_, AppState>) -> CmdResult<()> {
+    let app = lift_session(&state).await?;
+    app.commission_estop().await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn lift_commission_csv(state: State<'_, AppState>) -> CmdResult<String> {
+    let app = lift_session(&state).await?;
+    app.commission_csv().map_err(err)
 }

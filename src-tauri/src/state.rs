@@ -13,6 +13,7 @@ use hex_motor::cia402::Cia402Manager;
 use tokio::sync::Mutex;
 
 use crate::hopea3::{Hopea3, InitProgress};
+use crate::lift::LiftSession;
 use crate::logging::LogHandle;
 use crate::unified_smartknob::ActiveSmartKnob;
 
@@ -37,10 +38,17 @@ pub struct AppState {
     /// Live init progress for the UI to poll while `hopea3_start` runs. A `std`
     /// mutex: only short, await-free updates happen under it.
     pub hopea3_init: StdMutex<InitProgress>,
+    /// Direct-CANopen lift debug session. It owns heartbeat/TPDO subscriptions
+    /// and the velocity watchdog stream for exactly one lift node.
+    pub lift: Mutex<Option<Arc<LiftSession>>>,
     /// Base(Zenoh):到 hex-controller 的连接(至多一条)。
     pub zenoh: Mutex<Option<crate::zenoh_base::ZenohConn>>,
     /// Arm(Zenoh):到 hex-controller 机械臂的连接(至多一条)。
     pub zenoh_arm: Mutex<Option<crate::zenoh_arm::ZenohArmConn>>,
+    /// Controller Config(Zenoh):到 hex-controller launcher 的连接(读写 launch.yaml,至多一条)。
+    pub config: Mutex<Option<crate::zenoh_config::ZenohConfigConn>>,
+    /// EE(Zenoh):到 hex-controller 末端执行器的连接(机器人控制台共用其全量发现,至多一条)。
+    pub zenoh_ee: Mutex<Option<crate::zenoh_ee::ZenohEeConn>>,
     /// The running SmartKnob Robot Application, if started. At most one at a
     /// time (it owns the high-rate haptic loop on the single bus).
     pub smartknob: Mutex<Option<ActiveSmartKnob>>,

@@ -3,7 +3,48 @@
 // snake_case parameters.
 
 import { invoke } from "@tauri-apps/api/core";
-import type { ArmInfo, BaseInfo, CanAggReply, CanAnalyzerStatus, CanBusHealth, CanFilterSpec, CanSendSpec, CanTraceReply, EventsSnapshot, Hopea3InitProgress, Hopea3State, ImuState, KnobConfig, LiveState, LogLine, MotorInfo, MotorMode, MotorTarget, SmartKnobDevice, SmartKnobProfile, SmartKnobStartRequest, SmartKnobTarget, SmartKnobTelemetry, SmartKnobTuning, UnifiedSmartKnobState, ZenohArmState, ZenohBaseState } from "./types";
+import type {
+  ArmInfo,
+  ArmUrdf,
+  BaseInfo,
+  CanAggReply,
+  CanAnalyzerStatus,
+  CanBusHealth,
+  CanFilterSpec,
+  CanSendSpec,
+  CanTraceReply,
+  ConfigGetDto,
+  ConfigSetResult,
+  ConfigValidateResult,
+  ConsoleUrdf,
+  ControllerInfo,
+  EeInfo,
+  EventsSnapshot,
+  Hopea3InitProgress,
+  Hopea3State,
+  ImuState,
+  KnobConfig,
+  LiftState,
+  LiveState,
+  LogLine,
+  MotorInfo,
+  MotorMode,
+  MotorTarget,
+  MountEdge,
+  RestartResult,
+  RobotNode,
+  SceneRobot,
+  SmartKnobDevice,
+  SmartKnobProfile,
+  SmartKnobStartRequest,
+  SmartKnobTarget,
+  SmartKnobTelemetry,
+  SmartKnobTuning,
+  UnifiedSmartKnobState,
+  ZenohArmState,
+  ZenohBaseState,
+  ZenohEeState,
+} from "./types";
 
 export const api = {
   connect: (iface: string, ourNid: number, broadcastHeartbeat: boolean) =>
@@ -55,6 +96,33 @@ export const api = {
   hopea3ReinitMotor: (nid: number) => invoke<void>("hopea3_reinit_motor", { nid }),
   hopea3ResetOdom: () => invoke<void>("hopea3_reset_odom"),
   hopea3GetState: () => invoke<Hopea3State>("hopea3_get_state"),
+
+  // Lift raw-CAN Robot Application
+  liftStart: (nid: number) => invoke<LiftState>("lift_start", { nid }),
+  liftStop: () => invoke<void>("lift_stop"),
+  liftGetState: () => invoke<LiftState>("lift_get_state"),
+  liftRefresh: () => invoke<LiftState>("lift_refresh"),
+  liftSetNmt: (command: string) => invoke<void>("lift_set_nmt", { command }),
+  liftDisable: () => invoke<void>("lift_disable"),
+  liftHome: () => invoke<void>("lift_home"),
+  liftClearFault: () => invoke<void>("lift_clear_fault"),
+  liftSetVelocity: (velocityMps: number) =>
+    invoke<void>("lift_set_velocity", { velocityMps }),
+  liftRenewVelocity: () => invoke<void>("lift_renew_velocity"),
+  liftSetPosition: (positionM: number) =>
+    invoke<void>("lift_set_position", { positionM }),
+  liftCommissionArm: () => invoke<number>("lift_commission_arm"),
+  liftCommissionClearFault: () =>
+    invoke<void>("lift_commission_clear_fault"),
+  liftCommissionEpochService: (motorDisconnected: boolean) =>
+    invoke<void>("lift_commission_epoch_service", { motorDisconnected }),
+  liftCommissionHold: (dutyPermille: number) =>
+    invoke<number>("lift_commission_hold", { dutyPermille }),
+  liftCommissionRenew: () => invoke<void>("lift_commission_renew"),
+  liftCommissionRelease: () => invoke<void>("lift_commission_release"),
+  liftCommissionDisarm: () => invoke<void>("lift_commission_disarm"),
+  liftCommissionEstop: () => invoke<void>("lift_commission_estop"),
+  liftCommissionCsv: () => invoke<string>("lift_commission_csv"),
 
   // SmartKnob Robot Application
   smartknobListDevices: () =>
@@ -130,12 +198,48 @@ export const api = {
   armSetGravity: (gravity: [number, number, number]) => invoke<void>("arm_set_gravity", { gravity }),
   armGoto: (q: number[], kp: number, kd: number) => invoke<void>("arm_goto", { q, kp, kd }),
   armGetState: () => invoke<ZenohArmState>("arm_get_state"),
+  armGetUrdf: (prefix: string) => invoke<ArmUrdf | null>("arm_get_urdf", { prefix }),
   armRelease: () => invoke<void>("arm_release"),
   armSetDiagFocus: (prefix: string) => invoke<void>("arm_set_diag_focus", { prefix }),
   armRefreshDiag: () => invoke<void>("arm_refresh_diag"),
   armGetEvents: () => invoke<EventsSnapshot>("arm_get_events"),
   armGetLogs: () => invoke<LogLine[]>("arm_get_logs"),
   armClearFault: () => invoke<void>("arm_clear_fault"),
+
+  // EE(Zenoh)
+  eeConnect: (connect: string) => invoke<void>("ee_connect", { connect }),
+  eeDisconnect: () => invoke<void>("ee_disconnect"),
+  eeDiscover: () => invoke<EeInfo[]>("ee_discover"),
+  eeDiscoverAll: () => invoke<RobotNode[]>("ee_discover_all"),
+  eeAcquire: (prefix: string, model: string) => invoke<void>("ee_acquire", { prefix, model }),
+  eeSetFocus: (prefix: string) => invoke<void>("ee_set_focus", { prefix }),
+  eeGoto: (q: number, kp?: number) => invoke<void>("ee_goto", { q, kp: kp ?? null }),
+  eeSetMode: (mode: number) => invoke<void>("ee_set_mode", { mode }),
+  eeSetEstopBehavior: (behavior: number) => invoke<void>("ee_set_estop_behavior", { behavior }),
+  eeClearFault: () => invoke<void>("ee_clear_fault"),
+  eeGetState: () => invoke<ZenohEeState>("ee_get_state"),
+  eeRelease: () => invoke<void>("ee_release"),
+  eeScene: () => invoke<SceneRobot[]>("ee_scene"),
+  consoleGetUrdf: (prefix: string, kindName: string) => invoke<ConsoleUrdf | null>("console_get_urdf", { prefix, kindName }),
+  eeMachines: () => invoke<Record<string, MountEdge[]>>("ee_machines"),
+
+  // Controller Config(Zenoh)
+  configConnect: (connect: string) => invoke<void>("config_connect", { connect }),
+  configDisconnect: () => invoke<void>("config_disconnect"),
+  configDiscover: () => invoke<ControllerInfo[]>("config_discover"),
+  configGet: (cid: string) => invoke<ConfigGetDto>("config_get", { cid }),
+  configValidate: (cid: string, yaml: string) =>
+    invoke<ConfigValidateResult>("config_validate", { cid, yaml }),
+  configSet: (
+    cid: string,
+    yaml: string,
+    expectSha256: string,
+    apply: boolean,
+    confirm: boolean,
+    force: boolean,
+  ) => invoke<ConfigSetResult>("config_set", { cid, yaml, expectSha256, apply, confirm, force }),
+  configRestart: (cid: string, confirm: boolean, force: boolean) =>
+    invoke<RestartResult>("config_restart", { cid, confirm, force }),
 };
 
 /** Normalise a thrown Tauri error (usually a plain string) to a message. */

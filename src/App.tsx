@@ -9,15 +9,18 @@ import { ImuPanel } from "./components/ImuPanel";
 import { ChangeIdTool } from "./components/ChangeIdTool";
 import { ZeroTool } from "./components/ZeroTool";
 import { Hopea3Panel } from "./components/Hopea3Panel";
+import { LiftPanel } from "./components/LiftPanel";
 import { SmartKnobPanel } from "./components/SmartKnobPanel";
+import RobotConsole from "./components/RobotConsole";
 import { ZenohPanel } from "./components/ZenohPanel";
 import { ArmPanel } from "./components/ArmPanel";
+import { ControllerConfigPanel } from "./components/ControllerConfigPanel";
 import { CanAnalyzerPanel } from "./components/CanAnalyzerPanel";
 import { TutorialModal, TUTORIALS } from "./components/Tutorial";
 import type { MotorInfo } from "./types";
 import "./App.css";
 
-type Tool = "control" | "changeId" | "zero" | "hopea3" | "smartknob" | "zenoh" | "arm" | "canalyzer";
+type Tool = "control" | "changeId" | "zero" | "hopea3" | "lift" | "smartknob" | "zenoh" | "arm" | "config" | "canalyzer" | "console";
 
 const DEVICE_POLL_MS = 700;
 
@@ -78,8 +81,9 @@ export default function App() {
     }
     try {
       await api.disconnect();
-    } catch {
-      /* ignore */
+    } catch (e) {
+      message.error(`${t("disconnectFailed")}: ${errMsg(e)}`);
+      return;
     }
     setConnected(false);
     setSelectedNid(null);
@@ -87,7 +91,7 @@ export default function App() {
     setDevices([]);
     setTutorialOpen(false);
     setTool(null);
-  }, [tool]);
+  }, [message, t, tool]);
 
   const onToggleLog = useCallback(
     async (nid: number, on: boolean) => {
@@ -120,18 +124,28 @@ export default function App() {
     changeId: { title: t("toolChangeId"), desc: t("toolChangeIdDesc") },
     zero: { title: t("toolZero"), desc: t("toolZeroDesc") },
     hopea3: { title: t("toolHopeA3"), desc: t("toolHopeA3Desc") },
+    lift: { title: t("toolLift"), desc: t("toolLiftDesc") },
     smartknob: { title: t("toolSmartKnob"), desc: t("toolSmartKnobDesc") },
     zenoh: { title: t("toolBaseZenoh"), desc: t("toolBaseZenohDesc") },
     arm: { title: t("toolArmZenoh"), desc: t("toolArmZenohDesc") },
+    config: { title: t("toolConfig"), desc: t("toolConfigDesc") },
     canalyzer: { title: t("toolCanalyzer"), desc: t("toolCanalyzerDesc") },
+    console: { title: t("toolConsole"), desc: t("toolConsoleDesc") },
   } satisfies Record<Tool, { title: string; desc: string }>;
   const { title: toolTitle, desc: toolDesc } = toolMeta[tool];
   const needsHeartbeat = tool === "control" || tool === "hopea3" || tool === "smartknob";
   // hopea3 / smartknob / zenoh / arm / canalyzer 都是整屏面板;zenoh/arm 走 Zenoh,
   // canalyzer 自带总线连接,都不使用顶栏的电机 ConnectBar。
   const showSidebar =
-    tool !== "hopea3" && tool !== "smartknob" && tool !== "zenoh" && tool !== "arm" && tool !== "canalyzer";
-  const showConnectBar = tool !== "zenoh" && tool !== "arm" && tool !== "canalyzer";
+    tool !== "console" &&
+    tool !== "hopea3" &&
+    tool !== "lift" &&
+    tool !== "smartknob" &&
+    tool !== "zenoh" &&
+    tool !== "arm" &&
+    tool !== "config" &&
+    tool !== "canalyzer";
+  const showConnectBar = tool !== "console" && tool !== "zenoh" && tool !== "arm" && tool !== "config" && tool !== "canalyzer";
 
   return (
     <Layout className={`app-shell app-shell--${tool}`}>
@@ -180,14 +194,20 @@ export default function App() {
           </Layout.Sider>
         )}
         <Layout.Content className="app-content">
-          {tool === "hopea3" ? (
+          {tool === "console" ? (
+            <RobotConsole />
+          ) : tool === "hopea3" ? (
             <Hopea3Panel connected={connected} />
+          ) : tool === "lift" ? (
+            <LiftPanel connected={connected} />
           ) : tool === "smartknob" ? (
             <SmartKnobPanel connected={connected} />
           ) : tool === "zenoh" ? (
             <ZenohPanel />
           ) : tool === "arm" ? (
             <ArmPanel />
+          ) : tool === "config" ? (
+            <ControllerConfigPanel />
           ) : tool === "canalyzer" ? (
             <CanAnalyzerPanel />
           ) : tool === "changeId" ? (
@@ -224,7 +244,6 @@ export default function App() {
 
 function ToolPicker({ onPick }: { onPick: (t: Tool) => void }) {
   const { t, lang, toggle } = useI18n();
-  const [tutorialOpen, setTutorialOpen] = useState(false);
   return (
     <div className="tool-picker">
       <div className="tool-picker__actions">
@@ -261,6 +280,13 @@ function ToolPicker({ onPick }: { onPick: (t: Tool) => void }) {
 
         <ToolSection title={t("catRobotApp")} hint={t("catRobotAppHint")}>
           <ToolCard
+            title={t("toolConsole")}
+            desc={t("toolConsoleDesc")}
+            tag={t("tagRobotApi")}
+            accent="cyan"
+            onClick={() => onPick("console")}
+          />
+          <ToolCard
             title={t("toolBaseZenoh")}
             desc={t("toolBaseZenohDesc")}
             tag={t("tagRobotApi")}
@@ -280,6 +306,20 @@ function ToolPicker({ onPick }: { onPick: (t: Tool) => void }) {
             tag={t("tagMobileBase")}
             accent="orange"
             onClick={() => onPick("hopea3")}
+          />
+          <ToolCard
+            title={t("toolLift")}
+            desc={t("toolLiftDesc")}
+            tag={t("tagLift")}
+            accent="green"
+            onClick={() => onPick("lift")}
+          />
+          <ToolCard
+            title={t("toolConfig")}
+            desc={t("toolConfigDesc")}
+            tag={t("tagConfig")}
+            accent="slate"
+            onClick={() => onPick("config")}
           />
         </ToolSection>
 
@@ -305,17 +345,8 @@ function ToolPicker({ onPick }: { onPick: (t: Tool) => void }) {
             accent="cyan"
             onClick={() => onPick("canalyzer")}
           />
-          <ToolCard
-            title={t("toolTutorial")}
-            desc={t("toolTutorialDesc")}
-            tag={t("tagQuickStart")}
-            accent="slate"
-            onClick={() => setTutorialOpen(true)}
-          />
         </ToolSection>
       </div>
-
-      <TutorialModal open={tutorialOpen} onClose={() => setTutorialOpen(false)} />
     </div>
   );
 }
