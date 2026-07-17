@@ -13,8 +13,25 @@ interface BasePoseViewerProps {
   wz: number;
 }
 
+interface YawIndicator {
+  group: THREE.Group;
+  line: THREE.Line;
+  cone: THREE.Mesh;
+  sign: 1 | -1;
+}
+
 const MAX_TRAIL = 500;
+const MOTION_EPSILON = 1e-4;
+const FULL_LINEAR_SPEED_MPS = 1;
+const FULL_ANGULAR_SPEED_RPS = 1;
 const VELOCITY_ARROW_Y = 0.48;
+const VELOCITY_ARROW_MAX_LENGTH = 1.25;
+const VELOCITY_ARROW_MAX_HEAD_LENGTH = 0.18;
+const VELOCITY_ARROW_MAX_HEAD_WIDTH = 0.09;
+const YAW_ARROW_RADIUS = 0.62;
+const YAW_ARROW_Y = 0.42;
+const YAW_ARROW_MAX_SPAN = Math.PI * 1.42;
+const YAW_ARROW_SEGMENTS = 48;
 
 export function BasePoseViewer({ connected, poseX, poseY, theta, vx, vy, wz }: BasePoseViewerProps) {
   const mountRef = useRef<HTMLDivElement>(null);
@@ -24,8 +41,8 @@ export function BasePoseViewer({ connected, poseX, poseY, theta, vx, vy, wz }: B
   const controlsRef = useRef<OrbitControls | null>(null);
   const robotRef = useRef<THREE.Group | null>(null);
   const velocityRef = useRef<THREE.ArrowHelper | null>(null);
-  const yawLeftRef = useRef<THREE.Group | null>(null);
-  const yawRightRef = useRef<THREE.Group | null>(null);
+  const yawLeftRef = useRef<YawIndicator | null>(null);
+  const yawRightRef = useRef<YawIndicator | null>(null);
   const trailRef = useRef<THREE.Line | null>(null);
   const trailPointsRef = useRef<THREE.Vector3[]>([]);
   const lastTrailRef = useRef<THREE.Vector3 | null>(null);
@@ -93,7 +110,7 @@ export function BasePoseViewer({ connected, poseX, poseY, theta, vx, vy, wz }: B
     const yawRight = makeYawIndicator(-1);
     yawLeftRef.current = yawLeft;
     yawRightRef.current = yawRight;
-    robot.add(yawLeft, yawRight);
+    robot.add(yawLeft.group, yawRight.group);
 
     const resize = () => {
       const rect = mount.getBoundingClientRect();
@@ -145,21 +162,26 @@ export function BasePoseViewer({ connected, poseX, poseY, theta, vx, vy, wz }: B
     robot.rotation.y = -theta;
 
     const speed = Math.hypot(vx, vy);
-    if (speed > 1e-4) {
+    if (speed > MOTION_EPSILON) {
+      const velocityScale = Math.min(speed / FULL_LINEAR_SPEED_MPS, 1);
       velocity.visible = true;
       velocity.position.set(0, VELOCITY_ARROW_Y, 0);
       velocity.setDirection(new THREE.Vector3(vx, 0, vy).normalize());
-      velocity.setLength(Math.min(1.25, 0.35 + speed * 1.6), 0.18, 0.09);
+      velocity.setLength(
+        VELOCITY_ARROW_MAX_LENGTH * velocityScale,
+        VELOCITY_ARROW_MAX_HEAD_LENGTH * velocityScale,
+        VELOCITY_ARROW_MAX_HEAD_WIDTH * velocityScale,
+      );
     } else {
       velocity.visible = false;
     }
 
     const yawSpeed = Math.abs(wz);
-    yawLeft.visible = wz > 1e-4;
-    yawRight.visible = wz < -1e-4;
-    const yawScale = 0.86 + Math.min(0.18, yawSpeed * 0.08);
-    yawLeft.scale.setScalar(yawScale);
-    yawRight.scale.setScalar(yawScale);
+    yawLeft.group.visible = wz > MOTION_EPSILON;
+    yawRight.group.visible = wz < -MOTION_EPSILON;
+    const yawScale = Math.min(yawSpeed / FULL_ANGULAR_SPEED_RPS, 1);
+    updateYawIndicator(yawLeft, yawScale);
+    updateYawIndicator(yawRight, yawScale);
 
     const p = new THREE.Vector3(poseX, 0.035, poseY);
     const last = lastTrailRef.current;
@@ -261,37 +283,47 @@ function makeAxis(color: number, dir: THREE.Vector3, label: string): THREE.Group
   return g;
 }
 
-function makeYawIndicator(sign: 1 | -1): THREE.Group {
+function makeYawIndicator(sign: 1 | -1): YawIndicator {
   const color = 0xffc857;
-  const radius = 0.62;
-  const y = 0.34;
-  const start = sign > 0 ? -Math.PI * 0.72 : Math.PI * 0.72;
-  const span = sign > 0 ? Math.PI * 1.42 : -Math.PI * 1.42;
-  const points: THREE.Vector3[] = [];
-
-  for (let i = 0; i <= 48; i += 1) {
-    const a = start + span * (i / 48);
-    points.push(new THREE.Vector3(Math.cos(a) * radius, y, Math.sin(a) * radius));
-  }
-
   const g = new THREE.Group();
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute(
+    "position",
+    new THREE.BufferAttribute(new Float32Array((YAW_ARROW_SEGMENTS + 1) * 3), 3),
+  );
   const line = new THREE.Line(
-    new THREE.BufferGeometry().setFromPoints(points),
+    geometry,
     new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.95 }),
   );
   g.add(line);
 
-  const end = points[points.length - 1];
   const cone = new THREE.Mesh(
     new THREE.ConeGeometry(0.07, 0.16, 24),
     new THREE.MeshStandardMaterial({ color, emissive: 0x5a3b00, roughness: 0.35 }),
   );
-  const tangentAngle = start + span + (sign > 0 ? Math.PI / 2 : -Math.PI / 2);
-  cone.position.copy(end);
   cone.rotation.z = -Math.PI / 2;
-  cone.rotation.y = -tangentAngle;
   g.add(cone);
 
+  const indicator = { group: g, line, cone, sign };
+  updateYawIndicator(indicator, 1);
   g.visible = false;
-  return g;
+  return indicator;
+}
+
+function updateYawIndicator(indicator: YawIndicator, scale: number): void {
+  const { line, cone, sign } = indicator;
+  const start = sign > 0 ? -Math.PI * 0.72 : Math.PI * 0.72;
+  const span = sign * YAW_ARROW_MAX_SPAN * scale;
+  const positions = line.geometry.getAttribute("position") as THREE.BufferAttribute;
+
+  for (let i = 0; i <= YAW_ARROW_SEGMENTS; i += 1) {
+    const a = start + span * (i / YAW_ARROW_SEGMENTS);
+    positions.setXYZ(i, Math.cos(a) * YAW_ARROW_RADIUS, YAW_ARROW_Y, Math.sin(a) * YAW_ARROW_RADIUS);
+  }
+  positions.needsUpdate = true;
+
+  const end = start + span;
+  cone.position.set(Math.cos(end) * YAW_ARROW_RADIUS, YAW_ARROW_Y, Math.sin(end) * YAW_ARROW_RADIUS);
+  cone.rotation.y = -(end + sign * Math.PI / 2);
+  cone.scale.setScalar(scale);
 }

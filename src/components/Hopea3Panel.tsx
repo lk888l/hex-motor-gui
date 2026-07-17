@@ -284,12 +284,12 @@ export function Hopea3Panel({ connected }: { connected: boolean }) {
             <span />
             <Button disabled={!canDrive} {...hold(manualLinear, 0, 0)}>▲</Button>
             <span />
-            <Button disabled={!canDrive} {...hold(0, -manualLinear, 0)}>◀</Button>
+            <Button disabled={!canDrive} {...hold(0, manualLinear, 0)}>◀</Button>
             <Button danger disabled={!canDrive} onClick={stopMotion}>{t("zStop")}</Button>
-            <Button disabled={!canDrive} {...hold(0, manualLinear, 0)}>▶</Button>
-            <Button disabled={!canDrive} {...hold(0, 0, -manualAngular)}>↺</Button>
+            <Button disabled={!canDrive} {...hold(0, -manualLinear, 0)}>▶</Button>
+            <Button disabled={!canDrive} {...hold(0, 0, manualAngular)}>↺</Button>
             <Button disabled={!canDrive} {...hold(-manualLinear, 0, 0)}>▼</Button>
-            <Button disabled={!canDrive} {...hold(0, 0, manualAngular)}>↻</Button>
+            <Button disabled={!canDrive} {...hold(0, 0, -manualAngular)}>↻</Button>
           </div>
 
           <div className="zenoh-speed-grid">
@@ -536,10 +536,10 @@ function readKeyboard(keys: Set<string>, linear: number, angular: number): Twist
     switch (KEY_MAP[k]) {
       case "fwd": fx += 1; break;
       case "back": fx -= 1; break;
-      case "left": fy -= 1; break;
-      case "right": fy += 1; break;
-      case "ccw": fz -= 1; break;
-      case "cw": fz += 1; break;
+      case "left": fy += 1; break;
+      case "right": fy -= 1; break;
+      case "ccw": fz += 1; break;
+      case "cw": fz -= 1; break;
     }
   }
   if (fx === 0 && fy === 0 && fz === 0) return null;
