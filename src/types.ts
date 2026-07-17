@@ -174,6 +174,76 @@ export interface SmartKnobState {
   d_gain: number;
 }
 
+export type SmartKnobKind = "canopen" | "rollercan";
+export type SmartKnobControlSide = "host" | "firmware";
+export type SmartKnobEffortUnit = "Nm" | "A";
+
+/** Protocol-qualified address. Node IDs may overlap across device kinds. */
+export interface SmartKnobTarget {
+  kind: SmartKnobKind;
+  nodeId: number;
+}
+
+export interface SmartKnobDevice {
+  target: SmartKnobTarget;
+  name: string;
+  online: boolean;
+  controlSide: SmartKnobControlSide;
+  effortUnit: SmartKnobEffortUnit;
+}
+
+export interface SmartKnobProfile {
+  target: SmartKnobTarget;
+  configs: KnobConfig[];
+  controlSide: SmartKnobControlSide;
+  effortUnit: SmartKnobEffortUnit;
+  supportsTemperature: boolean;
+  supportsTelemetry: boolean;
+  effortLimitMax: number;
+  maxOutputPermille: number;
+  telemetryEnabled: boolean | null;
+  telemetryRateHz: number | null;
+}
+
+export interface SmartKnobTuning {
+  pGain: number;
+  dGain: number;
+  strengthScale: number;
+  effortLimit: number;
+  maxOutputPermille: number;
+  frictionCompensation: number;
+  clickEffort: number;
+}
+
+export interface SmartKnobTelemetry {
+  enabled: boolean;
+  rateHz: number;
+}
+
+export interface SmartKnobStartRequest {
+  target: SmartKnobTarget;
+  configIndex: number;
+  customConfig?: KnobConfig;
+  tuning?: SmartKnobTuning;
+  telemetry?: SmartKnobTelemetry;
+}
+
+/**
+ * Unified live state. The legacy snake_case position/config fields remain for
+ * compatibility; effort is consumed only through the unit-aware fields below.
+ */
+export interface UnifiedSmartKnobState extends SmartKnobState {
+  target: SmartKnobTarget | null;
+  controlSide: SmartKnobControlSide;
+  effortUnit: SmartKnobEffortUnit;
+  appliedEffort: number;
+  measuredEffort: number | null;
+  effortLimit: number;
+  maxOutputPermille: number;
+  telemetryEnabled: boolean | null;
+  telemetryRateHz: number | null;
+}
+
 // ── Diagnostics (log / events viewing — mirrors diag.rs DTOs) ──
 export interface LogLine {
   proc: string;    // publishing process (arm0 / base0 / launcher / imu0…)
@@ -331,45 +401,6 @@ export interface CanSendSpec {
   /** Requested DLC for RTR frames (ignored otherwise). */
   dlc: number;
   data: number[];
-}
-
-// Unit RollerCAN trial panel (raw CAN 2.0 extended-frame protocol).
-export interface RollerCanFeedback {
-  node_id: number;
-  host_id: number;
-  speed_rpm: number;
-  position_deg: number;
-  current_ma: number;
-  voltage_v: number;
-  mode: number;
-  state: number;
-  fault_raw: number;
-  fault_over_range: boolean;
-  fault_stall: boolean;
-  fault_over_voltage: boolean;
-  age_ms: number;
-}
-
-export interface RollerCanParamValue {
-  index: number;
-  value: number;
-  raw_u32: number;
-  age_ms: number;
-}
-
-export interface RollerCanEvent {
-  t_ms: number;
-  dir: "rx" | "tx";
-  id: number;
-  data: string;
-  note: string;
-}
-
-export interface RollerCanState {
-  connected: boolean;
-  feedback: RollerCanFeedback | null;
-  last_param: RollerCanParamValue | null;
-  events: RollerCanEvent[];
 }
 
 // Tagged target union the backend deserializes (dto::MotorTargetDto).

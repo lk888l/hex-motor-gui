@@ -3,7 +3,7 @@
 // snake_case parameters.
 
 import { invoke } from "@tauri-apps/api/core";
-import type { ArmInfo, BaseInfo, CanAggReply, CanAnalyzerStatus, CanBusHealth, CanFilterSpec, CanSendSpec, CanTraceReply, EventsSnapshot, Hopea3InitProgress, Hopea3State, ImuState, KnobConfig, LiveState, LogLine, MotorInfo, MotorMode, MotorTarget, RollerCanState, SmartKnobState, ZenohArmState, ZenohBaseState } from "./types";
+import type { ArmInfo, BaseInfo, CanAggReply, CanAnalyzerStatus, CanBusHealth, CanFilterSpec, CanSendSpec, CanTraceReply, EventsSnapshot, Hopea3InitProgress, Hopea3State, ImuState, KnobConfig, LiveState, LogLine, MotorInfo, MotorMode, MotorTarget, SmartKnobDevice, SmartKnobProfile, SmartKnobStartRequest, SmartKnobTarget, SmartKnobTelemetry, SmartKnobTuning, UnifiedSmartKnobState, ZenohArmState, ZenohBaseState } from "./types";
 
 export const api = {
   connect: (iface: string, ourNid: number, broadcastHeartbeat: boolean) =>
@@ -57,51 +57,26 @@ export const api = {
   hopea3GetState: () => invoke<Hopea3State>("hopea3_get_state"),
 
   // SmartKnob Robot Application
-  smartknobConfigs: () => invoke<KnobConfig[]>("smartknob_configs"),
-  smartknobStart: (nid: number, configIndex: number) =>
-    invoke<void>("smartknob_start", { nid, configIndex }),
+  smartknobListDevices: () =>
+    invoke<SmartKnobDevice[]>("smartknob_list_devices"),
+  smartknobGetProfile: (target: SmartKnobTarget) =>
+    invoke<SmartKnobProfile>("smartknob_get_profile", { target }),
+  smartknobProbe: (nodeId: number) =>
+    invoke<SmartKnobDevice>("smartknob_probe", { nodeId }),
+  smartknobStart: (request: SmartKnobStartRequest) =>
+    invoke<void>("smartknob_start", { request }),
   smartknobStop: () => invoke<void>("smartknob_stop"),
   smartknobSetConfig: (index: number) =>
     invoke<void>("smartknob_set_config", { index }),
-  smartknobSetTuning: (
-      pGain: number,
-      dGain: number,
-      strengthScale: number,
-      torqueLimitNm: number,
-      maxTorquePermille: number,
-      frictionCompensation: number,
-      clickTorqueNm: number,
-    ) =>
-    invoke<void>("smartknob_set_tuning", {
-      pGain,
-      dGain,
-      strengthScale,
-      torqueLimitNm,
-      maxTorquePermille,
-      frictionCompensation,
-      clickTorqueNm,
-    }),
+  smartknobSetTuning: (tuning: SmartKnobTuning) =>
+    invoke<void>("smartknob_set_tuning", { tuning }),
   smartknobClearError: () => invoke<void>("smartknob_clear_error"),
-  smartknobGetState: () => invoke<SmartKnobState>("smartknob_get_state"),
-  smartknobSetCustomConfig: (cfg: KnobConfig) =>
-    invoke<void>("smartknob_set_custom_config", {
-      position: cfg.position,
-      minPosition: cfg.min_position,
-      maxPosition: cfg.max_position,
-      positionWidthRadians: cfg.position_width_radians,
-      detentStrengthUnit: cfg.detent_strength_unit,
-      endstopStrengthUnit: cfg.endstop_strength_unit,
-      snapPoint: cfg.snap_point,
-      snapPointBias: cfg.snap_point_bias,
-      detentPositions: cfg.detent_positions,
-      clickTorqueNm: cfg.click_torque_nm,
-      frictionCompensation: cfg.friction_compensation,
-      strengthScale: cfg.strength_scale,
-      pGain: cfg.p_gain,
-      dGain: cfg.d_gain,
-      text: cfg.text,
-      ledHue: cfg.led_hue,
-    }),
+  smartknobGetState: () =>
+    invoke<UnifiedSmartKnobState>("smartknob_get_state"),
+  smartknobSetCustomConfig: (config: KnobConfig) =>
+    invoke<void>("smartknob_set_custom_config", { config }),
+  smartknobSetTelemetry: (telemetry: SmartKnobTelemetry) =>
+    invoke<void>("smartknob_set_telemetry", { telemetry }),
 
   // IMU
   imuStart: (nid: number) => invoke<void>("imu_start", { nid }),
@@ -128,32 +103,6 @@ export const api = {
     invoke<string>("analyzer_sdo_read", { node, index, sub, dtype, timeoutMs, retries }),
   analyzerSdoWrite: (node: number, index: number, sub: number, dtype: string, value: string, timeoutMs: number, retries: number) =>
     invoke<string>("analyzer_sdo_write", { node, index, sub, dtype, value, timeoutMs, retries }),
-
-  // Unit RollerCAN trial panel
-  rollercanConfigs: () => invoke<KnobConfig[]>("rollercan_configs"),
-  rollercanConnect: (spec: string) => invoke<void>("rollercan_connect", { spec }),
-  rollercanDisconnect: () => invoke<void>("rollercan_disconnect"),
-  rollercanGetState: () => invoke<RollerCanState>("rollercan_get_state"),
-  rollercanPing: (hostId: number, targetId: number) =>
-    invoke<void>("rollercan_ping", { hostId, targetId }),
-  rollercanEnable: (configIndex: number, targetId: number) =>
-    invoke<void>("rollercan_enable", { configIndex, targetId }),
-  rollercanStopMotor: (hostId: number, targetId: number) =>
-    invoke<void>("rollercan_stop_motor", { hostId, targetId }),
-  rollercanReleaseStall: (hostId: number, targetId: number) =>
-    invoke<void>("rollercan_release_stall", { hostId, targetId }),
-  rollercanSaveFlash: (hostId: number, targetId: number) =>
-    invoke<void>("rollercan_save_flash", { hostId, targetId }),
-  rollercanSetCanId: (hostId: number, targetId: number, newId: number) =>
-    invoke<void>("rollercan_set_can_id", { hostId, targetId, newId }),
-  rollercanSetBitrate: (hostId: number, targetId: number, bitrate: number) =>
-    invoke<void>("rollercan_set_bitrate", { hostId, targetId, bitrate }),
-  rollercanSetStallProtection: (hostId: number, targetId: number, enabled: boolean) =>
-    invoke<void>("rollercan_set_stall_protection", { hostId, targetId, enabled }),
-  rollercanReadParam: (hostId: number, targetId: number, index: number) =>
-    invoke<void>("rollercan_read_param", { hostId, targetId, index }),
-  rollercanWriteParam: (hostId: number, targetId: number, index: number, value: number) =>
-    invoke<void>("rollercan_write_param", { hostId, targetId, index, value }),
 
   // Base(Zenoh)
   zenohConnect: (connect: string) => invoke<void>("zenoh_connect", { connect }),

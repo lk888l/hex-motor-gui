@@ -79,7 +79,6 @@ export const TUTORIALS: Record<string, Slide[]> = {
   zero: placeholderSlides("zero"),
   hopea3: placeholderSlides("hopea3"),
   smartknob: placeholderSlides("smartknob"),
-  rollercan: placeholderSlides("rollercan"),
   zenoh: placeholderSlides("zenoh"),
   arm: placeholderSlides("arm"),
   canalyzer: placeholderSlides("canalyzer"),

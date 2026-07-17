@@ -13,12 +13,11 @@ import { SmartKnobPanel } from "./components/SmartKnobPanel";
 import { ZenohPanel } from "./components/ZenohPanel";
 import { ArmPanel } from "./components/ArmPanel";
 import { CanAnalyzerPanel } from "./components/CanAnalyzerPanel";
-import { RollerCanPanel } from "./components/RollerCanPanel";
 import { TutorialModal, TUTORIALS } from "./components/Tutorial";
 import type { MotorInfo } from "./types";
 import "./App.css";
 
-type Tool = "control" | "changeId" | "zero" | "hopea3" | "smartknob" | "rollercan" | "zenoh" | "arm" | "canalyzer";
+type Tool = "control" | "changeId" | "zero" | "hopea3" | "smartknob" | "zenoh" | "arm" | "canalyzer";
 
 const DEVICE_POLL_MS = 700;
 
@@ -74,6 +73,9 @@ export default function App() {
   }, []);
 
   const switchTool = useCallback(async () => {
+    if (tool === "smartknob") {
+      await api.smartknobStop().catch(() => {});
+    }
     try {
       await api.disconnect();
     } catch {
@@ -85,7 +87,7 @@ export default function App() {
     setDevices([]);
     setTutorialOpen(false);
     setTool(null);
-  }, []);
+  }, [tool]);
 
   const onToggleLog = useCallback(
     async (nid: number, on: boolean) => {
@@ -119,7 +121,6 @@ export default function App() {
     zero: { title: t("toolZero"), desc: t("toolZeroDesc") },
     hopea3: { title: t("toolHopeA3"), desc: t("toolHopeA3Desc") },
     smartknob: { title: t("toolSmartKnob"), desc: t("toolSmartKnobDesc") },
-    rollercan: { title: t("toolRollerCan"), desc: t("toolRollerCanDesc") },
     zenoh: { title: t("toolBaseZenoh"), desc: t("toolBaseZenohDesc") },
     arm: { title: t("toolArmZenoh"), desc: t("toolArmZenohDesc") },
     canalyzer: { title: t("toolCanalyzer"), desc: t("toolCanalyzerDesc") },
@@ -129,8 +130,8 @@ export default function App() {
   // hopea3 / smartknob / zenoh / arm / canalyzer 都是整屏面板;zenoh/arm 走 Zenoh,
   // canalyzer 自带总线连接,都不使用顶栏的电机 ConnectBar。
   const showSidebar =
-    tool !== "hopea3" && tool !== "smartknob" && tool !== "rollercan" && tool !== "zenoh" && tool !== "arm" && tool !== "canalyzer";
-  const showConnectBar = tool !== "zenoh" && tool !== "arm" && tool !== "canalyzer" && tool !== "rollercan";
+    tool !== "hopea3" && tool !== "smartknob" && tool !== "zenoh" && tool !== "arm" && tool !== "canalyzer";
+  const showConnectBar = tool !== "zenoh" && tool !== "arm" && tool !== "canalyzer";
 
   return (
     <Layout className={`app-shell app-shell--${tool}`}>
@@ -182,9 +183,7 @@ export default function App() {
           {tool === "hopea3" ? (
             <Hopea3Panel connected={connected} />
           ) : tool === "smartknob" ? (
-            <SmartKnobPanel connected={connected} devices={devices} />
-          ) : tool === "rollercan" ? (
-            <RollerCanPanel />
+            <SmartKnobPanel connected={connected} />
           ) : tool === "zenoh" ? (
             <ZenohPanel />
           ) : tool === "arm" ? (
@@ -257,13 +256,6 @@ function ToolPicker({ onPick }: { onPick: (t: Tool) => void }) {
             tag={t("tagHaptics")}
             accent="lime"
             onClick={() => onPick("smartknob")}
-          />
-          <ToolCard
-            title={t("toolRollerCan")}
-            desc={t("toolRollerCanDesc")}
-            tag={t("tagRawCan")}
-            accent="cyan"
-            onClick={() => onPick("rollercan")}
           />
         </ToolSection>
 

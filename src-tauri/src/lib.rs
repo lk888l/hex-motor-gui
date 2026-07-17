@@ -16,10 +16,58 @@ mod rollercan;
 mod sdo_client;
 mod smartknob;
 mod state;
+mod unified_smartknob;
 mod zenoh_arm;
 mod zenoh_base;
 
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
+
 use state::AppState;
+use tauri::Manager;
+
+const SHUTDOWN_IDLE: u8 = 0;
+const SHUTDOWN_RUNNING: u8 = 1;
+const SHUTDOWN_COMPLETE: u8 = 2;
+
+fn begin_safe_shutdown<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, phase: &Arc<AtomicU8>) {
+    if phase
+        .compare_exchange(
+            SHUTDOWN_IDLE,
+            SHUTDOWN_RUNNING,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        return;
+    }
+
+    // Signal an in-flight startup before disconnect_state waits for
+    // connection_op. Both SmartKnob drivers check this flag between bounded
+    // bus operations and execute their normal disable rollback.
+    app_handle
+        .state::<AppState>()
+        .shutdown_requested
+        .store(true, Ordering::SeqCst);
+
+    let app_handle = app_handle.clone();
+    let phase = phase.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app_handle.state::<AppState>();
+        if tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            commands::disconnect_state(&state),
+        )
+        .await
+        .is_err()
+        {
+            log::error!("safe shutdown timed out after 30 seconds; forcing application exit");
+        }
+        phase.store(SHUTDOWN_COMPLETE, Ordering::SeqCst);
+        app_handle.exit(0);
+    });
+}
 
 pub fn run() {
     let _ = env_logger::Builder::from_env(
@@ -28,7 +76,9 @@ pub fn run() {
     .try_init();
     let _timer_resolution = request_timer_resolution();
 
-    tauri::Builder::default()
+    let shutdown_phase = Arc::new(AtomicU8::new(SHUTDOWN_IDLE));
+    let close_phase = shutdown_phase.clone();
+    let app = tauri::Builder::default()
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             commands::connect,
@@ -63,6 +113,9 @@ pub fn run() {
             commands::hopea3_reset_odom,
             commands::hopea3_get_state,
             commands::smartknob_configs,
+            commands::smartknob_list_devices,
+            commands::smartknob_get_profile,
+            commands::smartknob_probe,
             commands::smartknob_start,
             commands::smartknob_stop,
             commands::smartknob_set_config,
@@ -70,6 +123,7 @@ pub fn run() {
             commands::smartknob_clear_error,
             commands::smartknob_get_state,
             commands::smartknob_set_custom_config,
+            commands::smartknob_set_telemetry,
             commands::imu_start,
             commands::imu_stop,
             commands::imu_get_state,
@@ -85,20 +139,6 @@ pub fn run() {
             commands::analyzer_send,
             commands::analyzer_sdo_read,
             commands::analyzer_sdo_write,
-            commands::rollercan_connect,
-            commands::rollercan_configs,
-            commands::rollercan_disconnect,
-            commands::rollercan_get_state,
-            commands::rollercan_ping,
-            commands::rollercan_enable,
-            commands::rollercan_stop_motor,
-            commands::rollercan_release_stall,
-            commands::rollercan_save_flash,
-            commands::rollercan_set_can_id,
-            commands::rollercan_set_bitrate,
-            commands::rollercan_set_stall_protection,
-            commands::rollercan_read_param,
-            commands::rollercan_write_param,
             commands::zenoh_connect,
             commands::zenoh_disconnect,
             commands::zenoh_discover,
@@ -127,8 +167,26 @@ pub fn run() {
             commands::arm_get_logs,
             commands::arm_clear_fault,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .on_window_event(move |window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if close_phase.load(Ordering::SeqCst) != SHUTDOWN_COMPLETE {
+                    api.prevent_close();
+                    begin_safe_shutdown(window.app_handle(), &close_phase);
+                }
+            }
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    let run_phase = shutdown_phase;
+    app.run(move |app_handle, event| {
+        if let tauri::RunEvent::ExitRequested { api, .. } = event {
+            if run_phase.load(Ordering::SeqCst) != SHUTDOWN_COMPLETE {
+                api.prevent_exit();
+                begin_safe_shutdown(app_handle, &run_phase);
+            }
+        }
+    });
 }
 
 #[cfg(windows)]

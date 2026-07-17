@@ -6,6 +6,7 @@
 //! can run concurrently.
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use hex_motor::cia402::Cia402Manager;
@@ -13,10 +14,18 @@ use tokio::sync::Mutex;
 
 use crate::hopea3::{Hopea3, InitProgress};
 use crate::logging::LogHandle;
-use crate::smartknob::SmartKnob;
+use crate::unified_smartknob::ActiveSmartKnob;
 
 #[derive(Default)]
 pub struct AppState {
+    /// Set synchronously by the native close handler. Long SmartKnob startup
+    /// transactions poll this flag between bounded bus operations so shutdown
+    /// can roll them back before waiting for the lifecycle lock.
+    pub shutdown_requested: AtomicBool,
+    /// Serialises physical adapter open/close operations. Tauri commands can
+    /// otherwise race a slow `connect` against `disconnect` and publish only
+    /// half of the manager/monitor pair.
+    pub connection_op: Mutex<()>,
     pub manager: Mutex<Option<Arc<Cia402Manager>>>,
     /// Active CSV recorders, keyed by node id. Inserted by `start_log`,
     /// removed by `stop_log` / `disconnect`. A `std` mutex is fine: we only
@@ -34,7 +43,7 @@ pub struct AppState {
     pub zenoh_arm: Mutex<Option<crate::zenoh_arm::ZenohArmConn>>,
     /// The running SmartKnob Robot Application, if started. At most one at a
     /// time (it owns the high-rate haptic loop on the single bus).
-    pub smartknob: Mutex<Option<SmartKnob>>,
+    pub smartknob: Mutex<Option<ActiveSmartKnob>>,
     /// The running IMU session, if started. At most one at a time; it streams
     /// the selected IMU's TPDO1 and publishes a snapshot for the UI to poll.
     pub imu: Mutex<Option<crate::imu::ImuManager>>,
@@ -42,8 +51,8 @@ pub struct AppState {
     /// directly, no `Cia402Manager`), so it is stopped unconditionally on
     /// `disconnect` / tool switch, independent of `manager`.
     pub analyzer: Mutex<Option<crate::analyzer::CanAnalyzer>>,
-    /// Trial Unit RollerCAN session. It owns a raw CAN 2.0 extended-frame bus
-    /// and is intentionally separate from both the CiA402 manager and analyzer.
+    /// Unit RollerCAN protocol monitor attached to the manager-owned `CanBus`.
+    /// It does not open or own a second physical adapter in the product path.
     pub rollercan: Mutex<Option<crate::rollercan::RollerCanSession>>,
 }
 
