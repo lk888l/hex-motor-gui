@@ -77,12 +77,19 @@ pub async fn disconnect(state: State<'_, AppState>) -> CmdResult<()> {
 /// the host loop or firmware-owned RollerCAN output enabled while slower
 /// application cleanup is still in progress.
 pub(crate) async fn disconnect_state(state: &AppState) {
+    log::info!("disconnect cleanup: waiting for lifecycle lock");
     let _connection_op = state.connection_op.lock().await;
+    log::info!("disconnect cleanup: lifecycle lock acquired; quiescing RollerCAN discovery");
+    if let Some(session) = state.rollercan.lock().await.as_ref() {
+        session.begin_shutdown();
+    }
+    log::info!("disconnect cleanup: stopping active SmartKnob");
     if let Err(error) = stop_active_smartknob(state).await {
         log::warn!(
             "SmartKnob stop during disconnect failed; retrying with session teardown: {error}"
         );
     }
+    log::info!("disconnect cleanup: tearing down RollerCAN monitor");
     if let Some(app) = state.rollercan.lock().await.take() {
         app.stop().await;
     }
@@ -109,6 +116,7 @@ pub(crate) async fn disconnect_state(state: &AppState) {
     if was {
         log::info!("disconnected");
     }
+    log::info!("disconnect cleanup: complete");
 }
 
 async fn stop_active_smartknob(state: &AppState) -> CmdResult<()> {
@@ -423,12 +431,6 @@ pub async fn hopea3_get_state(state: State<'_, AppState>) -> CmdResult<crate::ho
 #[tauri::command]
 pub fn smartknob_configs() -> Vec<crate::smartknob::KnobConfig> {
     crate::smartknob::preset_configs()
-}
-
-/// RollerCAN haptic presets. Static; does not require a bus connection.
-#[tauri::command]
-pub fn rollercan_configs() -> Vec<crate::rollercan::KnobConfig> {
-    crate::rollercan::preset_configs()
 }
 
 /// List protocol-qualified SmartKnob targets found on the shared CAN bus.
@@ -1132,183 +1134,6 @@ pub async fn analyzer_sdo_write(
         retries.saturating_add(1),
     )
     .await
-}
-
-// ───────────────────────── RollerCAN trial ─────────────────────────
-
-#[tauri::command]
-pub async fn rollercan_connect(state: State<'_, AppState>, spec: String) -> CmdResult<()> {
-    let mut guard = state.rollercan.lock().await;
-    if guard.is_some() {
-        return Err("RollerCAN already connected; disconnect it first".into());
-    }
-    let app = crate::rollercan::RollerCanSession::start(&spec)
-        .await
-        .map_err(err)?;
-    *guard = Some(app);
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn rollercan_disconnect(state: State<'_, AppState>) -> CmdResult<()> {
-    if let Some(app) = state.rollercan.lock().await.take() {
-        app.stop().await;
-    }
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn rollercan_get_state(
-    state: State<'_, AppState>,
-) -> CmdResult<crate::rollercan::RollerCanStateDto> {
-    Ok(match state.rollercan.lock().await.as_ref() {
-        Some(app) => app.snapshot(),
-        None => crate::rollercan::RollerCanStateDto::default(),
-    })
-}
-
-#[tauri::command]
-pub async fn rollercan_ping(
-    state: State<'_, AppState>,
-    host_id: u8,
-    target_id: u8,
-) -> CmdResult<()> {
-    let guard = state.rollercan.lock().await;
-    let app = guard
-        .as_ref()
-        .ok_or_else(|| "RollerCAN not connected".to_string())?;
-    app.ping(host_id, target_id).await.map_err(err)
-}
-
-#[tauri::command]
-pub async fn rollercan_enable(
-    state: State<'_, AppState>,
-    config_index: u8,
-    target_id: u8,
-) -> CmdResult<()> {
-    let guard = state.rollercan.lock().await;
-    let app = guard
-        .as_ref()
-        .ok_or_else(|| "RollerCAN not connected".to_string())?;
-    app.enable(config_index, target_id).await.map_err(err)
-}
-
-#[tauri::command]
-pub async fn rollercan_stop_motor(
-    state: State<'_, AppState>,
-    host_id: u8,
-    target_id: u8,
-) -> CmdResult<()> {
-    let guard = state.rollercan.lock().await;
-    let app = guard
-        .as_ref()
-        .ok_or_else(|| "RollerCAN not connected".to_string())?;
-    app.stop_motor(host_id, target_id).await.map_err(err)
-}
-
-#[tauri::command]
-pub async fn rollercan_release_stall(
-    state: State<'_, AppState>,
-    host_id: u8,
-    target_id: u8,
-) -> CmdResult<()> {
-    let guard = state.rollercan.lock().await;
-    let app = guard
-        .as_ref()
-        .ok_or_else(|| "RollerCAN not connected".to_string())?;
-    app.release_stall(host_id, target_id).await.map_err(err)
-}
-
-#[tauri::command]
-pub async fn rollercan_save_flash(
-    state: State<'_, AppState>,
-    host_id: u8,
-    target_id: u8,
-) -> CmdResult<()> {
-    let guard = state.rollercan.lock().await;
-    let app = guard
-        .as_ref()
-        .ok_or_else(|| "RollerCAN not connected".to_string())?;
-    app.save_flash(host_id, target_id).await.map_err(err)
-}
-
-#[tauri::command]
-pub async fn rollercan_set_can_id(
-    state: State<'_, AppState>,
-    host_id: u8,
-    target_id: u8,
-    new_id: u8,
-) -> CmdResult<()> {
-    let guard = state.rollercan.lock().await;
-    let app = guard
-        .as_ref()
-        .ok_or_else(|| "RollerCAN not connected".to_string())?;
-    app.set_can_id(host_id, target_id, new_id)
-        .await
-        .map_err(err)
-}
-
-#[tauri::command]
-pub async fn rollercan_set_bitrate(
-    state: State<'_, AppState>,
-    host_id: u8,
-    target_id: u8,
-    bitrate: u8,
-) -> CmdResult<()> {
-    let guard = state.rollercan.lock().await;
-    let app = guard
-        .as_ref()
-        .ok_or_else(|| "RollerCAN not connected".to_string())?;
-    app.set_bitrate(host_id, target_id, bitrate)
-        .await
-        .map_err(err)
-}
-
-#[tauri::command]
-pub async fn rollercan_set_stall_protection(
-    state: State<'_, AppState>,
-    host_id: u8,
-    target_id: u8,
-    enabled: bool,
-) -> CmdResult<()> {
-    let guard = state.rollercan.lock().await;
-    let app = guard
-        .as_ref()
-        .ok_or_else(|| "RollerCAN not connected".to_string())?;
-    app.set_stall_protection(host_id, target_id, enabled)
-        .await
-        .map_err(err)
-}
-
-#[tauri::command]
-pub async fn rollercan_read_param(
-    state: State<'_, AppState>,
-    host_id: u8,
-    target_id: u8,
-    index: u16,
-) -> CmdResult<()> {
-    let guard = state.rollercan.lock().await;
-    let app = guard
-        .as_ref()
-        .ok_or_else(|| "RollerCAN not connected".to_string())?;
-    app.read_param(host_id, target_id, index).await.map_err(err)
-}
-
-#[tauri::command]
-pub async fn rollercan_write_param(
-    state: State<'_, AppState>,
-    host_id: u8,
-    target_id: u8,
-    index: u16,
-    value: i32,
-) -> CmdResult<()> {
-    let guard = state.rollercan.lock().await;
-    let app = guard
-        .as_ref()
-        .ok_or_else(|| "RollerCAN not connected".to_string())?;
-    app.write_param(host_id, target_id, index, value)
-        .await
-        .map_err(err)
 }
 
 // ───────────────────────── Base(Zenoh) ─────────────────────────

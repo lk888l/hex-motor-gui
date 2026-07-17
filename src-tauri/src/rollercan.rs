@@ -5,44 +5,32 @@
 //! node id `0xA8`. The STM32 owns the 1 kHz haptic loop; this module sends mode
 //! and tuning parameters and decodes the firmware's unsolicited telemetry.
 //!
-//! The old host-side haptic helpers remain below temporarily as test/reference
-//! code, but no runtime path starts that loop or streams current commands.
+//! There is deliberately no host-side haptic control loop here. The remaining
+//! code handles discovery, protocol I/O, verified configuration transactions,
+//! telemetry pairing, and fail-safe enable/disable around the firmware loop.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use can_transport::{CanBus, CanFilter, CanFrame, CanId, CanIoError, CanRx, FrameKind};
-use serde::Serialize;
 use tokio::task::JoinHandle;
 
 pub use crate::smartknob::KnobConfig;
 
-const HISTORY_CAP: usize = 80;
-const CONTROL_HZ: u64 = 500;
-const CURRENT_MODE: i32 = 3;
-const CURRENT_X100_LIMIT: i32 = 120_000;
-const MA_X100_PER_AMP: f64 = 100_000.0;
 // Firmware presets use 0.45 A by default; 1.2 A is only the hard capability
 // ceiling exposed by the profile. Keep the host mirror aligned so switching
 // to an as-yet-untuned mode does not make the UI report a looser limit.
 const ROLLER_DEFAULT_CURRENT_LIMIT_A: f64 = 0.45;
 pub(crate) const ROLLER_HARD_CURRENT_LIMIT_A: f64 = 1.2;
-const ROLLER_OUTPUT_DEADBAND_A: f64 = 0.06;
-const ROLLER_CURRENT_DIRECTION: f64 = 1.0;
-const ROLLER_SENSOR_DIRECTION: f64 = 1.0;
 const DEG: f64 = std::f64::consts::PI / 180.0;
 
-const OD_SAVE_FLASH: u16 = 0x7002;
 const OD_RELEASE_PROTECTION: u16 = 0x7003;
 const OD_ENABLE: u16 = 0x7004;
 const OD_RUN_MODE: u16 = 0x7005;
 const OD_CURRENT: u16 = 0x7006;
-const OD_SPEED_READBACK: u16 = 0x7030;
-const OD_POSITION_READBACK: u16 = 0x7031;
-const OD_CURRENT_READBACK: u16 = 0x7032;
 
 const RC_CMD_SET_CONFIG: u16 = 0x8001;
 const RC_TELEMETRY_ENABLE: u16 = 0x8002;
@@ -93,70 +81,6 @@ fn ensure_start_not_cancelled(shutdown_requested: Option<&AtomicBool>) -> Result
         ));
     }
     Ok(())
-}
-
-const DEAD_ZONE_DETENT_PERCENT: f64 = 0.2;
-const DEAD_ZONE_RAD: f64 = std::f64::consts::PI / 180.0;
-const IDLE_VELOCITY_EWMA_ALPHA: f64 = 0.001;
-const IDLE_VELOCITY_RAD_PER_SEC: f64 = 0.05;
-const IDLE_CORRECTION_DELAY: Duration = Duration::from_millis(500);
-const IDLE_CORRECTION_MAX_ANGLE_RAD: f64 = 5.0 * std::f64::consts::PI / 180.0;
-const IDLE_CORRECTION_RATE_ALPHA: f64 = 0.0005;
-const MAX_VEL_RAD_S: f64 = 60.0;
-const PID_LIMIT: f64 = 10.0;
-const CLICK_PHASE_DURATION: Duration = Duration::from_millis(2);
-const CLICK_TOTAL_DURATION: Duration = Duration::from_millis(4);
-const HAPTIC_TIMING_WARN_THRESHOLD: Duration = Duration::from_millis(4);
-
-#[derive(Clone, Default, Serialize)]
-pub struct RollerCanFeedback {
-    pub node_id: u8,
-    pub host_id: u8,
-    pub speed_rpm: i16,
-    pub position_deg: i16,
-    pub current_ma: i16,
-    pub voltage_v: i16,
-    pub mode: u8,
-    pub state: u8,
-    pub fault_raw: u8,
-    pub fault_over_range: bool,
-    pub fault_stall: bool,
-    pub fault_over_voltage: bool,
-    pub age_ms: u64,
-}
-
-#[derive(Clone, Default)]
-struct RollerCanRealtime {
-    position_deg: Option<(f64, Instant)>,
-    speed_rpm: Option<(f64, Instant)>,
-    current_a: Option<(f64, Instant)>,
-}
-
-#[derive(Clone)]
-struct RollerCanSensor {
-    shaft_angle_rad: f64,
-    position_at: Instant,
-    speed_rpm: Option<f64>,
-    current_a: Option<f64>,
-    feedback: RollerCanFeedback,
-}
-
-#[derive(Clone, Serialize)]
-pub struct RollerCanEvent {
-    pub t_ms: u64,
-    pub dir: &'static str,
-    pub id: u32,
-    pub data: String,
-    pub note: String,
-}
-
-#[derive(Clone, Default, Serialize)]
-pub struct RollerCanStateDto {
-    pub connected: bool,
-    #[serde(flatten)]
-    pub knob: crate::smartknob::SmartKnobState,
-    pub feedback: Option<RollerCanFeedback>,
-    pub events: Vec<RollerCanEvent>,
 }
 
 #[derive(Clone)]
@@ -268,10 +192,7 @@ pub struct RollerCanDiscoveredDevice {
 
 #[derive(Default)]
 struct RollerCanState {
-    feedback: Option<(RollerCanFeedback, Instant)>,
-    realtime: RollerCanRealtime,
     knob: crate::smartknob::SmartKnobState,
-    events: VecDeque<RollerCanEvent>,
     nodes: HashMap<u8, RollerCanNode>,
     selected_node: Option<u8>,
     /// One-shot readback waiters registered before a 0x11 request is sent.
@@ -286,74 +207,6 @@ struct RollerCanState {
 }
 
 impl RollerCanState {
-    fn push_event(&mut self, t_ms: u64, dir: &'static str, id: u32, data: &[u8], note: String) {
-        if self.events.len() >= HISTORY_CAP {
-            self.events.pop_front();
-        }
-        self.events.push_back(RollerCanEvent {
-            t_ms,
-            dir,
-            id,
-            data: hex(data),
-            note,
-        });
-    }
-
-    fn feedback(&self) -> Option<RollerCanFeedback> {
-        let now = Instant::now();
-        self.feedback.as_ref().map(|(f, at)| {
-            let mut f = f.clone();
-            f.age_ms = now.duration_since(*at).as_millis() as u64;
-            f
-        })
-    }
-
-    fn sensor(&self) -> Option<RollerCanSensor> {
-        let feedback = self.feedback()?;
-        let now = Instant::now();
-        let position = self
-            .realtime
-            .position_deg
-            .filter(|(_, at)| now.duration_since(*at) < Duration::from_millis(250));
-        let (position_deg, position_at) = position.unwrap_or((
-            feedback.position_deg as f64,
-            now - Duration::from_millis(feedback.age_ms),
-        ));
-        let speed_rpm = self
-            .realtime
-            .speed_rpm
-            .filter(|(_, at)| now.duration_since(*at) < Duration::from_millis(250))
-            .map(|(v, _)| v)
-            .or(Some(feedback.speed_rpm as f64));
-        let current_a = self
-            .realtime
-            .current_a
-            .filter(|(_, at)| now.duration_since(*at) < Duration::from_millis(250))
-            .map(|(v, _)| v)
-            .or(Some(feedback.current_ma as f64 / 1000.0));
-
-        Some(RollerCanSensor {
-            shaft_angle_rad: ROLLER_SENSOR_DIRECTION * position_deg.to_radians(),
-            position_at,
-            speed_rpm,
-            current_a,
-            feedback,
-        })
-    }
-
-    fn snapshot(&self, connected: bool) -> RollerCanStateDto {
-        let knob = self
-            .selected_node
-            .and_then(|node_id| self.nodes.get(&node_id).map(|n| n.knob.clone()))
-            .unwrap_or_else(|| self.knob.clone());
-        RollerCanStateDto {
-            connected,
-            knob,
-            feedback: self.feedback(),
-            events: self.events.iter().cloned().collect(),
-        }
-    }
-
     fn devices(&self, now: Instant) -> Vec<RollerCanDiscoveredDevice> {
         let mut devices: Vec<_> = self
             .nodes
@@ -684,29 +537,19 @@ pub struct RollerCanSession {
     state: Arc<StdMutex<RollerCanState>>,
     rx_task: JoinHandle<()>,
     discovery_task: JoinHandle<()>,
-    haptic_task: StdMutex<Option<JoinHandle<()>>>,
     running: Arc<AtomicBool>,
     requested_config: Arc<StdMutex<usize>>,
     tuning: Arc<StdMutex<Tuning>>,
     per_mode_tuning: Arc<StdMutex<Vec<Tuning>>>,
     custom_config: Arc<StdMutex<KnobConfig>>,
-    custom_config_dirty: Arc<AtomicBool>,
     target_id: StdMutex<Option<u8>>,
     /// Non-zero response destination tag for correlating 0x11 readbacks and
     /// the final enable's cmd=0x02 status with their exact requests.
     next_response_host_id: AtomicU8,
     send_lock: Arc<tokio::sync::Mutex<()>>,
-    t0: Instant,
 }
 
 impl RollerCanSession {
-    pub async fn start(spec: &str) -> Result<Self> {
-        let bus = crate::backend::open_classic_1m_bus(spec).await?;
-        let session = Self::attach(bus).await?;
-        log::info!("RollerCAN SmartKnob connected on {spec:?}");
-        Ok(session)
-    }
-
     /// Attach the RollerCAN monitor to the manager-owned bus. This is the
     /// normal product path: a physical adapter is opened only once.
     pub async fn attach(bus: Arc<dyn CanBus>) -> Result<Self> {
@@ -715,14 +558,12 @@ impl RollerCanSession {
             .await
             .map_err(|e| anyhow!("subscribe RollerCAN extended frames: {e}"))?;
         let state = Arc::new(StdMutex::new(RollerCanState::default()));
-        let t0 = Instant::now();
-        let rx_task = tokio::spawn(drain_loop(rx, state.clone(), t0));
+        let rx_task = tokio::spawn(drain_loop(rx, state.clone()));
         let send_lock = Arc::new(tokio::sync::Mutex::new(()));
         let discovery_task = tokio::spawn(discovery_loop(
             bus.clone(),
             state.clone(),
             send_lock.clone(),
-            t0,
         ));
         let configs = preset_configs();
         let per_mode_tuning = configs.iter().map(Tuning::from_config).collect();
@@ -732,22 +573,15 @@ impl RollerCanSession {
             state,
             rx_task,
             discovery_task,
-            haptic_task: StdMutex::new(None),
             running: Arc::new(AtomicBool::new(false)),
             requested_config: Arc::new(StdMutex::new(0)),
             tuning: Arc::new(StdMutex::new(tuning)),
             per_mode_tuning: Arc::new(StdMutex::new(per_mode_tuning)),
             custom_config: Arc::new(StdMutex::new(configs[0].clone())),
-            custom_config_dirty: Arc::new(AtomicBool::new(false)),
             target_id: StdMutex::new(None),
             next_response_host_id: AtomicU8::new(1),
             send_lock,
-            t0,
         })
-    }
-
-    pub fn snapshot(&self) -> RollerCanStateDto {
-        self.state.lock().unwrap().snapshot(true)
     }
 
     pub fn devices(&self) -> Vec<RollerCanDiscoveredDevice> {
@@ -762,16 +596,6 @@ impl RollerCanSession {
         self.running.load(Ordering::SeqCst)
     }
 
-    pub fn is_confirmed(&self, node_id: u8) -> bool {
-        self.state
-            .lock()
-            .unwrap()
-            .nodes
-            .get(&node_id)
-            .map(RollerCanNode::confirmed)
-            .unwrap_or(false)
-    }
-
     pub fn knob_state(&self, node_id: u8) -> crate::smartknob::SmartKnobState {
         self.state.lock().unwrap().knob_for(node_id)
     }
@@ -783,10 +607,18 @@ impl RollerCanSession {
     /// Immediately probe one node (manual-ID fallback). Discovery continues
     /// in the background even if this call returns before the replies arrive.
     pub async fn probe(&self, node_id: u8) -> Result<()> {
-        probe_node(&self.bus, &self.send_lock, &self.state, self.t0, node_id).await
+        probe_node(&self.bus, &self.send_lock, node_id).await
+    }
+
+    /// Stop background transmitters before a shutdown disable transaction.
+    /// The receive task deliberately stays alive so nonce-correlated status
+    /// and parameter readback can still confirm that output is disabled.
+    pub fn begin_shutdown(&self) {
+        self.discovery_task.abort();
     }
 
     pub async fn stop(self) {
+        self.discovery_task.abort();
         let target = *self.target_id.lock().unwrap();
         if let Some(target) = target {
             if !self.best_effort_disable(target).await {
@@ -795,29 +627,10 @@ impl RollerCanSession {
                 );
             }
         }
-        self.stop_knob().await;
-        self.discovery_task.abort();
         let _ = self.discovery_task.await;
         self.rx_task.abort();
         let _ = self.rx_task.await;
         log::info!("RollerCAN SmartKnob disconnected");
-    }
-
-    pub async fn ping(&self, host_id: u8, target_id: u8) -> Result<()> {
-        self.send_command(0x00, 0, host_id, target_id, [0; 8], "ping")
-            .await
-    }
-
-    pub async fn enable(&self, config_index: u8, target_id: u8) -> Result<()> {
-        self.start_knob(
-            config_index as usize,
-            target_id,
-            None,
-            None,
-            crate::unified_smartknob::SmartKnobTelemetry::default(),
-            None,
-        )
-        .await
     }
 
     /// Execute firmware-owned SmartKnob startup as one ordered transaction.
@@ -1047,6 +860,9 @@ impl RollerCanSession {
             log::warn!("RollerCAN 0x{target_id:02X}: disable rollback failed: {error}");
         }
         let safely_disabled = disable.is_ok();
+        if safely_disabled {
+            *self.target_id.lock().unwrap() = None;
+        }
         self.running.store(!safely_disabled, Ordering::SeqCst);
         let mut state = self.state.lock().unwrap();
         if let Some(node) = state.nodes.get_mut(&target_id) {
@@ -1065,7 +881,6 @@ impl RollerCanSession {
     }
 
     pub async fn stop_motor(&self, _host_id: u8, target_id: u8) -> Result<()> {
-        self.stop_knob().await;
         let target = self.target_id.lock().unwrap().unwrap_or(target_id);
         let zero = self
             .write_param_raw(0, target, OD_CURRENT, 0, "zero current")
@@ -1081,6 +896,7 @@ impl RollerCanSession {
                     );
                 }
                 self.running.store(false, Ordering::SeqCst);
+                *self.target_id.lock().unwrap() = None;
                 let mut state = self.state.lock().unwrap();
                 if let Some(node) = state.nodes.get_mut(&target) {
                     node.knob.running = false;
@@ -1196,7 +1012,6 @@ impl RollerCanSession {
         let config = sanitize_custom_config(config);
         self.write_custom_config_raw(target_id, &config).await?;
         *self.custom_config.lock().unwrap() = config.clone();
-        self.custom_config_dirty.store(true, Ordering::SeqCst);
         let mut state = self.state.lock().unwrap();
         if let Some(node) = state.nodes.get_mut(&target_id) {
             if node.knob.config_index == 0 {
@@ -1320,52 +1135,6 @@ impl RollerCanSession {
             "release protection",
         )
         .await
-    }
-
-    pub async fn save_flash(&self, host_id: u8, target_id: u8) -> Result<()> {
-        self.write_param_raw(host_id, target_id, OD_SAVE_FLASH, 2, "save flash")
-            .await
-    }
-
-    pub async fn set_can_id(&self, host_id: u8, target_id: u8, new_id: u8) -> Result<()> {
-        self.send_command(0x07, new_id, host_id, target_id, [0; 8], "set CAN id")
-            .await
-    }
-
-    pub async fn set_bitrate(&self, host_id: u8, target_id: u8, bitrate: u8) -> Result<()> {
-        if bitrate > 2 {
-            return Err(anyhow!("bitrate must be 0(1M), 1(500K), or 2(125K)"));
-        }
-        self.send_command(0x0B, bitrate, host_id, target_id, [0; 8], "set CAN bitrate")
-            .await
-    }
-
-    pub async fn set_stall_protection(
-        &self,
-        host_id: u8,
-        target_id: u8,
-        enabled: bool,
-    ) -> Result<()> {
-        self.send_command(
-            if enabled { 0x0C } else { 0x0D },
-            0,
-            host_id,
-            target_id,
-            [0; 8],
-            if enabled {
-                "stall protection on"
-            } else {
-                "stall protection off"
-            },
-        )
-        .await
-    }
-
-    pub async fn read_param(&self, host_id: u8, target_id: u8, index: u16) -> Result<()> {
-        let mut data = [0u8; 8];
-        data[0..2].copy_from_slice(&index.to_le_bytes());
-        self.send_command(0x11, 0, host_id, target_id, data, "read param")
-            .await
     }
 
     fn register_param_read(
@@ -1599,132 +1368,6 @@ impl RollerCanSession {
         })?
     }
 
-    pub async fn write_param(
-        &self,
-        host_id: u8,
-        target_id: u8,
-        index: u16,
-        value: i32,
-    ) -> Result<()> {
-        match index {
-            RC_CMD_SET_CONFIG => {
-                let idx = value.max(0) as usize;
-                *self.requested_config.lock().unwrap() = idx;
-                if let Some(config) = preset_configs().get(idx).cloned() {
-                    let tuning = self
-                        .per_mode_tuning
-                        .lock()
-                        .unwrap()
-                        .get(idx)
-                        .copied()
-                        .unwrap_or_else(|| Tuning::from_config(&config));
-                    *self.tuning.lock().unwrap() = tuning;
-                    let mut state = self.state.lock().unwrap();
-                    state.knob.config_index = idx;
-                    state.knob.config = Some(config.clone());
-                    state.knob.min_position = config.min_position;
-                    state.knob.max_position = config.max_position;
-                    state.knob.num_positions = position_count(&config);
-                    state.knob.p_gain = tuning.p_gain;
-                    state.knob.d_gain = tuning.d_gain;
-                    state.knob.strength_scale = tuning.strength_scale;
-                    state.knob.torque_limit_nm = tuning.torque_limit_nm;
-                    state.knob.max_torque_permille = tuning.max_torque_permille;
-                    state.knob.friction_compensation = tuning.friction_compensation;
-                    state.knob.click_torque_nm = tuning.click_torque_nm;
-                }
-                self.write_param_raw(host_id, target_id, index, value, "select firmware preset")
-                    .await
-            }
-            RC_TUNING_P_GAIN
-            | RC_TUNING_D_GAIN
-            | RC_TUNING_STRENGTH
-            | RC_TUNING_TORQUE_LIMIT
-            | RC_TUNING_MAX_TORQUE
-            | RC_TUNING_FRICTION
-            | RC_TUNING_CLICK => {
-                let mut t = *self.tuning.lock().unwrap();
-                match index {
-                    RC_TUNING_P_GAIN => t.p_gain = scaled(value),
-                    RC_TUNING_D_GAIN => t.d_gain = scaled(value),
-                    RC_TUNING_STRENGTH => t.strength_scale = scaled(value),
-                    RC_TUNING_TORQUE_LIMIT => t.torque_limit_nm = scaled(value),
-                    RC_TUNING_MAX_TORQUE => t.max_torque_permille = value.clamp(0, 1000) as u16,
-                    RC_TUNING_FRICTION => t.friction_compensation = scaled(value),
-                    RC_TUNING_CLICK => t.click_torque_nm = scaled(value),
-                    _ => unreachable!(),
-                }
-                t = t.sanitized();
-                *self.tuning.lock().unwrap() = t;
-                let idx = *self.requested_config.lock().unwrap();
-                if let Some(slot) = self.per_mode_tuning.lock().unwrap().get_mut(idx) {
-                    *slot = t;
-                }
-                {
-                    let mut state = self.state.lock().unwrap();
-                    state.knob.p_gain = t.p_gain;
-                    state.knob.d_gain = t.d_gain;
-                    state.knob.strength_scale = t.strength_scale;
-                    state.knob.torque_limit_nm = t.torque_limit_nm;
-                    state.knob.max_torque_permille = t.max_torque_permille;
-                    state.knob.friction_compensation = t.friction_compensation;
-                    state.knob.click_torque_nm = t.click_torque_nm;
-                }
-                self.write_param_raw(host_id, target_id, index, value, "firmware tuning")
-                    .await
-            }
-            RC_CUSTOM_POSITION
-            | RC_CUSTOM_MIN_POSITION
-            | RC_CUSTOM_MAX_POSITION
-            | RC_CUSTOM_WIDTH_DEG
-            | RC_CUSTOM_DETENT_STRENGTH
-            | RC_CUSTOM_ENDSTOP_STRENGTH
-            | RC_CUSTOM_SNAP_POINT
-            | RC_CUSTOM_SNAP_BIAS
-            | RC_CUSTOM_CLICK
-            | RC_CUSTOM_FRICTION
-            | RC_CUSTOM_STRENGTH
-            | RC_CUSTOM_P_GAIN
-            | RC_CUSTOM_D_GAIN
-            | RC_CUSTOM_LED_HUE => {
-                let mut cfg = self.custom_config.lock().unwrap().clone();
-                match index {
-                    RC_CUSTOM_POSITION => cfg.position = value,
-                    RC_CUSTOM_MIN_POSITION => cfg.min_position = value,
-                    RC_CUSTOM_MAX_POSITION => cfg.max_position = value,
-                    RC_CUSTOM_WIDTH_DEG => {
-                        cfg.position_width_radians = scaled(value) * std::f64::consts::PI / 180.0
-                    }
-                    RC_CUSTOM_DETENT_STRENGTH => cfg.detent_strength_unit = scaled(value),
-                    RC_CUSTOM_ENDSTOP_STRENGTH => cfg.endstop_strength_unit = scaled(value),
-                    RC_CUSTOM_SNAP_POINT => cfg.snap_point = scaled(value),
-                    RC_CUSTOM_SNAP_BIAS => cfg.snap_point_bias = scaled(value),
-                    RC_CUSTOM_CLICK => cfg.click_torque_nm = scaled(value),
-                    RC_CUSTOM_FRICTION => cfg.friction_compensation = scaled(value),
-                    RC_CUSTOM_STRENGTH => cfg.strength_scale = scaled(value),
-                    RC_CUSTOM_P_GAIN => cfg.p_gain = scaled(value),
-                    RC_CUSTOM_D_GAIN => cfg.d_gain = scaled(value),
-                    RC_CUSTOM_LED_HUE => cfg.led_hue = value.clamp(0, 255),
-                    _ => unreachable!(),
-                }
-                *self.custom_config.lock().unwrap() = sanitize_custom_config(cfg);
-                self.custom_config_dirty.store(true, Ordering::SeqCst);
-                {
-                    let mut state = self.state.lock().unwrap();
-                    if state.knob.config_index == 0 {
-                        state.knob.config = Some(self.custom_config.lock().unwrap().clone());
-                    }
-                }
-                self.write_param_raw(host_id, target_id, index, value, "firmware custom config")
-                    .await
-            }
-            _ => {
-                self.write_param_raw(host_id, target_id, index, value, "write param")
-                    .await
-            }
-        }
-    }
-
     async fn write_param_raw(
         &self,
         host_id: u8,
@@ -1752,8 +1395,6 @@ impl RollerCanSession {
         send_command(
             &self.bus,
             &self.send_lock,
-            &self.state,
-            self.t0,
             cmd,
             param,
             host_id,
@@ -1763,249 +1404,11 @@ impl RollerCanSession {
         )
         .await
     }
-
-    async fn stop_knob(&self) {
-        self.running.store(false, Ordering::SeqCst);
-        let task = self.haptic_task.lock().unwrap().take();
-        if let Some(task) = task {
-            let _ = task.await;
-        }
-        self.state.lock().unwrap().knob.running = false;
-    }
-}
-
-async fn haptic_loop(
-    bus: Arc<dyn CanBus>,
-    state: Arc<StdMutex<RollerCanState>>,
-    running: Arc<AtomicBool>,
-    requested_config: Arc<StdMutex<usize>>,
-    tuning: Arc<StdMutex<Tuning>>,
-    per_mode_tuning: Arc<StdMutex<Vec<Tuning>>>,
-    custom_config: Arc<StdMutex<KnobConfig>>,
-    custom_config_dirty: Arc<AtomicBool>,
-    send_lock: Arc<tokio::sync::Mutex<()>>,
-    t0: Instant,
-    target_id: u8,
-) {
-    let configs = preset_configs();
-    let period = Duration::from_micros(1_000_000 / CONTROL_HZ);
-    let mut tick = tokio::time::interval(period);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut active_index = usize::MAX;
-    let mut config = configs[0].clone();
-    let mut h = Haptic::new(config.position);
-    let mut last_tick_at = Instant::now();
-    let mut last_warn: Option<Instant> = None;
-    let mut last_position_sample: Option<(f64, Instant)> = None;
-    let mut telemetry_phase: u64 = 0;
-
-    while running.load(Ordering::SeqCst) {
-        tick.tick().await;
-        let tick_at = Instant::now();
-        let loop_dt = tick_at.duration_since(last_tick_at);
-        last_tick_at = tick_at;
-        if loop_dt > HAPTIC_TIMING_WARN_THRESHOLD {
-            let should_warn = last_warn
-                .map(|t| tick_at.duration_since(t) >= Duration::from_secs(1))
-                .unwrap_or(true);
-            if should_warn {
-                log::warn!(
-                    "RollerCAN SmartKnob: loop tick took {:.2} ms",
-                    loop_dt.as_secs_f64() * 1000.0
-                );
-                last_warn = Some(tick_at);
-            }
-        }
-
-        let sensor = state.lock().unwrap().sensor();
-        let Some(sensor) = sensor else {
-            telemetry_phase = telemetry_phase.wrapping_add(1);
-            let _ =
-                request_realtime_sample(&bus, &send_lock, &state, t0, target_id, telemetry_phase)
-                    .await;
-            continue;
-        };
-        let feedback = sensor.feedback.clone();
-        let mut tun = *tuning.lock().unwrap();
-        let wanted = (*requested_config.lock().unwrap()).min(configs.len() - 1);
-        if wanted != active_index {
-            config = if configs[wanted].is_custom {
-                custom_config.lock().unwrap().clone()
-            } else {
-                configs[wanted].clone()
-            };
-            active_index = wanted;
-            h.detent.current_position = config.position;
-            if config.min_position <= config.max_position {
-                h.detent.current_position = h
-                    .detent
-                    .current_position
-                    .clamp(config.min_position, config.max_position);
-            }
-            h.detent.detent_center = sensor.shaft_angle_rad;
-            h.detent.last_idle_start = None;
-            h.click.prev_current_position = h.detent.current_position;
-            h.click.started_at = None;
-            h.click.dir = 1.0;
-            last_position_sample = Some((sensor.shaft_angle_rad, sensor.position_at));
-            let saved = per_mode_tuning.lock().unwrap()[wanted];
-            tun = saved;
-            *tuning.lock().unwrap() = saved;
-        }
-
-        if config.is_custom && custom_config_dirty.swap(false, Ordering::SeqCst) {
-            config = custom_config.lock().unwrap().clone();
-            if config.min_position <= config.max_position {
-                h.detent.current_position = h
-                    .detent
-                    .current_position
-                    .clamp(config.min_position, config.max_position);
-            }
-            h.click.prev_current_position = h.detent.current_position;
-            tun.p_gain = finite_nonnegative(config.p_gain);
-            tun.d_gain = finite_nonnegative(config.d_gain);
-            tun.friction_compensation = finite_nonnegative(config.friction_compensation);
-            tun.click_torque_nm = finite_nonnegative(config.click_torque_nm);
-            if let Some(slot) = per_mode_tuning.lock().unwrap().get_mut(active_index) {
-                slot.p_gain = tun.p_gain;
-                slot.d_gain = tun.d_gain;
-                slot.friction_compensation = tun.friction_compensation;
-                slot.click_torque_nm = tun.click_torque_nm;
-            }
-            *tuning.lock().unwrap() = tun;
-        }
-
-        let shaft_angle = sensor.shaft_angle_rad;
-        let velocity_rad_s = estimate_velocity_rad_s(
-            &mut last_position_sample,
-            shaft_angle,
-            sensor.position_at,
-            sensor.speed_rpm,
-        );
-        h.angle.shaft_angle = shaft_angle;
-
-        let num_positions = position_count(&config);
-        if num_positions != 1 {
-            idle_recenter(&mut h.detent, shaft_angle, velocity_rad_s);
-        }
-        let (angle_to_center, dead_zone_adjustment, out_of_bounds) =
-            snap_to_detent(&mut h.detent, shaft_angle, &config, num_positions);
-        let haptic_component = compute_haptic_pid(
-            &config,
-            &tun,
-            h.detent.current_position,
-            angle_to_center,
-            dead_zone_adjustment,
-            velocity_rad_s,
-            out_of_bounds,
-        );
-        let min_restoring = compute_min_restoring(
-            angle_to_center,
-            config.position_width_radians,
-            velocity_rad_s,
-            num_positions,
-        );
-        let friction_torque = compute_friction_coulomb(velocity_rad_s, tun.friction_compensation);
-        let click_active =
-            tun.click_torque_nm > 0.0 && !out_of_bounds && config.detent_positions.is_empty();
-        if h.detent.current_position != h.click.prev_current_position {
-            h.click.prev_current_position = h.detent.current_position;
-            if click_active {
-                h.click.started_at = Some(tick_at);
-                h.click.dir = -h.click.dir;
-            }
-        }
-        let click_torque =
-            compute_click_torque(&mut h.click, tun.click_torque_nm, click_active, tick_at);
-        let requested_current_a = if velocity_rad_s.abs() > MAX_VEL_RAD_S {
-            0.0
-        } else {
-            (haptic_component + click_torque + min_restoring + friction_torque)
-                .clamp(-tun.torque_limit_nm, tun.torque_limit_nm)
-        };
-        let current_x100 = effort_to_current_x100(requested_current_a, tun.max_torque_permille);
-        let applied_current_a = current_x100 as f64 / MA_X100_PER_AMP;
-        let data = param_frame(OD_CURRENT, current_x100);
-        if let Err(e) = send_command(
-            &bus,
-            &send_lock,
-            &state,
-            t0,
-            0x12,
-            0,
-            0,
-            target_id,
-            data,
-            "haptic current",
-        )
-        .await
-        {
-            log::warn!("RollerCAN SmartKnob: current send failed: {e}");
-        }
-        telemetry_phase = telemetry_phase.wrapping_add(1);
-        if let Err(e) =
-            request_realtime_sample(&bus, &send_lock, &state, t0, target_id, telemetry_phase).await
-        {
-            log::warn!("RollerCAN SmartKnob: realtime read failed: {e}");
-        }
-
-        let enabled = feedback.state == 1;
-        let error = if feedback.state == 2 || feedback.fault_raw != 0 {
-            Some(format!("fault 0b{:03b}", feedback.fault_raw))
-        } else {
-            None
-        };
-        let mut st = state.lock().unwrap();
-        st.knob.running = true;
-        st.knob.config_index = active_index;
-        st.knob.config = Some(config.clone());
-        st.knob.current_position = h.detent.current_position;
-        st.knob.min_position = config.min_position;
-        st.knob.max_position = config.max_position;
-        st.knob.num_positions = if num_positions > 0 { num_positions } else { 0 };
-        st.knob.sub_position_unit = h.detent.latest_sub_position_unit;
-        st.knob.shaft_angle_rad = shaft_angle;
-        st.knob.shaft_velocity_rev_per_s = velocity_rad_s / std::f64::consts::TAU;
-        st.knob.applied_torque_nm = applied_current_a;
-        st.knob.measured_torque_nm = sensor.current_a.map(|a| a as f32);
-        st.knob.at_endstop = out_of_bounds;
-        st.knob.node_id = target_id;
-        st.knob.online = feedback.age_ms < 500;
-        st.knob.enabled = enabled;
-        st.knob.driver_temp_c = None;
-        st.knob.motor_temp_c = None;
-        st.knob.error = error;
-        st.knob.strength_scale = tun.strength_scale;
-        st.knob.torque_limit_nm = tun.torque_limit_nm;
-        st.knob.max_torque_permille = tun.max_torque_permille;
-        st.knob.friction_compensation = tun.friction_compensation;
-        st.knob.click_torque_nm = tun.click_torque_nm;
-        st.knob.p_gain = tun.p_gain;
-        st.knob.d_gain = tun.d_gain;
-    }
-
-    let _ = send_command(
-        &bus,
-        &send_lock,
-        &state,
-        t0,
-        0x12,
-        0,
-        0,
-        target_id,
-        param_frame(OD_CURRENT, 0),
-        "zero current",
-    )
-    .await;
-    state.lock().unwrap().knob.running = false;
-    log::info!("RollerCAN SmartKnob: haptic loop stopped");
 }
 
 async fn send_command(
     bus: &Arc<dyn CanBus>,
     send_lock: &Arc<tokio::sync::Mutex<()>>,
-    state: &Arc<StdMutex<RollerCanState>>,
-    t0: Instant,
     cmd: u8,
     param: u8,
     host_id: u8,
@@ -2023,55 +1426,18 @@ async fn send_command(
     let _serialized = send_lock.lock().await;
     bus.send(frame)
         .await
-        .map_err(|e| anyhow!("send RollerCAN frame: {e}"))?;
-    let t_ms = t0.elapsed().as_millis() as u64;
-    state
-        .lock()
-        .unwrap()
-        .push_event(t_ms, "tx", raw_id, &data, note.to_string());
+        .map_err(|e| anyhow!("{note}: send RollerCAN frame: {e}"))?;
     Ok(())
-}
-
-async fn request_realtime_sample(
-    bus: &Arc<dyn CanBus>,
-    send_lock: &Arc<tokio::sync::Mutex<()>>,
-    state: &Arc<StdMutex<RollerCanState>>,
-    t0: Instant,
-    target_id: u8,
-    phase: u64,
-) -> Result<()> {
-    let index = match phase % 8 {
-        0 => OD_CURRENT_READBACK,
-        4 => OD_SPEED_READBACK,
-        _ => OD_POSITION_READBACK,
-    };
-    send_command(
-        bus,
-        send_lock,
-        state,
-        t0,
-        0x11,
-        0,
-        0,
-        target_id,
-        read_param_frame(index),
-        "read realtime",
-    )
-    .await
 }
 
 async fn probe_node(
     bus: &Arc<dyn CanBus>,
     send_lock: &Arc<tokio::sync::Mutex<()>>,
-    state: &Arc<StdMutex<RollerCanState>>,
-    t0: Instant,
     node_id: u8,
 ) -> Result<()> {
     send_command(
         bus,
         send_lock,
-        state,
-        t0,
         0x00,
         0,
         0,
@@ -2080,14 +1446,12 @@ async fn probe_node(
         "discovery ping",
     )
     .await?;
-    probe_identity(bus, send_lock, state, t0, node_id).await
+    probe_identity(bus, send_lock, node_id).await
 }
 
 async fn probe_identity(
     bus: &Arc<dyn CanBus>,
     send_lock: &Arc<tokio::sync::Mutex<()>>,
-    state: &Arc<StdMutex<RollerCanState>>,
-    t0: Instant,
     node_id: u8,
 ) -> Result<()> {
     for index in [
@@ -2099,8 +1463,6 @@ async fn probe_identity(
         send_command(
             bus,
             send_lock,
-            state,
-            t0,
             0x11,
             0,
             0,
@@ -2117,9 +1479,8 @@ async fn discovery_loop(
     bus: Arc<dyn CanBus>,
     state: Arc<StdMutex<RollerCanState>>,
     send_lock: Arc<tokio::sync::Mutex<()>>,
-    t0: Instant,
 ) {
-    if let Err(error) = probe_node(&bus, &send_lock, &state, t0, ROLLER_DEFAULT_NODE_ID).await {
+    if let Err(error) = probe_node(&bus, &send_lock, ROLLER_DEFAULT_NODE_ID).await {
         log::warn!("RollerCAN default-node probe failed: {error}");
     }
 
@@ -2141,7 +1502,7 @@ async fn discovery_loop(
                 let target = cursor;
                 cursor = cursor.wrapping_add(1);
                 if let Err(error) = send_command(
-                    &bus, &send_lock, &state, t0, 0x00, 0, 0, target, [0; 8], "background scan"
+                    &bus, &send_lock, 0x00, 0, 0, target, [0; 8], "background scan"
                 ).await {
                     log::warn!("RollerCAN background scan send failed: {error}");
                     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2159,7 +1520,7 @@ async fn discovery_loop(
                 };
                 for node_id in candidates {
                     if let Err(error) = send_command(
-                        &bus, &send_lock, &state, t0, 0x00, 0, 0, node_id, [0; 8], "known-node ping"
+                        &bus, &send_lock, 0x00, 0, 0, node_id, [0; 8], "known-node ping"
                     ).await {
                         log::warn!("RollerCAN known-node ping 0x{node_id:02X} failed: {error}");
                     }
@@ -2174,7 +1535,7 @@ async fn discovery_loop(
                 };
                 for node_id in candidates {
                     if let Err(error) = probe_identity(
-                        &bus, &send_lock, &state, t0, node_id
+                        &bus, &send_lock, node_id
                     ).await {
                         log::warn!("RollerCAN identity probe 0x{node_id:02X} failed: {error}");
                     }
@@ -2326,7 +1687,7 @@ fn telemetry_source_sequence(raw_id: u32) -> (u8, u8) {
     (((raw_id >> 8) & 0xff) as u8, ((raw_id >> 16) & 0xff) as u8)
 }
 
-async fn drain_loop(mut rx: Box<dyn CanRx>, state: Arc<StdMutex<RollerCanState>>, t0: Instant) {
+async fn drain_loop(mut rx: Box<dyn CanRx>, state: Arc<StdMutex<RollerCanState>>) {
     loop {
         match rx.recv().await {
             Ok(frame) => {
@@ -2335,37 +1696,21 @@ async fn drain_loop(mut rx: Box<dyn CanRx>, state: Arc<StdMutex<RollerCanState>>
                 }
                 let raw = frame.id().raw();
                 let data = frame.data();
-                let t_ms = t0.elapsed().as_millis() as u64;
                 let cmd = ((raw >> 24) & 0x1F) as u8;
                 let now = Instant::now();
                 let mut st = state.lock().unwrap();
                 match cmd {
                     0x02 if data.len() >= 8 => {
                         let fault = ((raw >> 16) & 0x07) as u8;
-                        let feedback = RollerCanFeedback {
-                            node_id: ((raw >> 8) & 0xFF) as u8,
-                            host_id: (raw & 0xFF) as u8,
-                            speed_rpm: i16::from_le_bytes([data[0], data[1]]),
-                            position_deg: i16::from_le_bytes([data[2], data[3]]),
-                            current_ma: i16::from_le_bytes([data[4], data[5]]),
-                            voltage_v: i16::from_le_bytes([data[6], data[7]]),
+                        let node_id = ((raw >> 8) & 0xFF) as u8;
+                        let host_id = (raw & 0xFF) as u8;
+                        let status = RollerCanStatus {
+                            fault,
                             mode: ((raw >> 19) & 0x07) as u8,
                             state: ((raw >> 22) & 0x03) as u8,
-                            fault_raw: fault,
-                            fault_over_range: (fault & 0b100) != 0,
-                            fault_stall: (fault & 0b010) != 0,
-                            fault_over_voltage: (fault & 0b001) != 0,
-                            age_ms: 0,
                         };
-                        let status = RollerCanStatus {
-                            fault: feedback.fault_raw,
-                            mode: feedback.mode,
-                            state: feedback.state,
-                        };
-                        observe_node(&mut st, feedback.node_id, now);
-                        fulfill_status(&mut st, feedback.node_id, feedback.host_id, status);
-                        st.feedback = Some((feedback, Instant::now()));
-                        st.push_event(t_ms, "rx", raw, data, "feedback".to_string());
+                        observe_node(&mut st, node_id, now);
+                        fulfill_status(&mut st, node_id, host_id, status);
                     }
                     0x11 | 0x13 if data.len() >= 8 => {
                         // Function-read replies put the device source in the
@@ -2373,16 +1718,12 @@ async fn drain_loop(mut rx: Box<dyn CanRx>, state: Arc<StdMutex<RollerCanState>>
                         let source = function_read_source(raw);
                         let host = function_read_host(raw);
                         update_identity_param(&mut st, source, host, data, now);
-                        update_realtime_param(&mut st, data);
-                        st.push_event(t_ms, "rx", raw, data, "param".to_string());
                     }
                     0x17 if data.len() >= 8 => {
                         ingest_telemetry(&mut st, cmd, raw, data, now);
-                        st.push_event(t_ms, "rx", raw, data, "SmartKnob state push".to_string());
                     }
                     0x18 if data.len() >= 8 => {
                         ingest_telemetry(&mut st, cmd, raw, data, now);
-                        st.push_event(t_ms, "rx", raw, data, "SmartKnob motion push".to_string());
                     }
                     0x00 => {
                         // Ping response is 0x0000SSFE: source lives in bits
@@ -2390,9 +1731,8 @@ async fn drain_loop(mut rx: Box<dyn CanRx>, state: Arc<StdMutex<RollerCanState>>
                         if let Some(source) = ping_response_source(raw) {
                             observe_node(&mut st, source, now);
                         }
-                        st.push_event(t_ms, "rx", raw, data, "id response".to_string())
                     }
-                    _ => st.push_event(t_ms, "rx", raw, data, format!("cmd 0x{cmd:02X}")),
+                    _ => {}
                 }
             }
             Err(CanIoError::Lagged { dropped }) => {
@@ -2444,50 +1784,6 @@ fn update_firmware_motion(state: &mut crate::smartknob::SmartKnobState, data: &[
     state.online = true;
 }
 
-struct AngleTracker {
-    shaft_angle: f64,
-}
-
-struct DetentState {
-    detent_center: f64,
-    current_position: i32,
-    idle_velocity_ewma: f64,
-    last_idle_start: Option<Instant>,
-    latest_sub_position_unit: f64,
-}
-
-struct ClickState {
-    prev_current_position: i32,
-    started_at: Option<Instant>,
-    dir: f64,
-}
-
-struct Haptic {
-    angle: AngleTracker,
-    detent: DetentState,
-    click: ClickState,
-}
-
-impl Haptic {
-    fn new(position: i32) -> Self {
-        Self {
-            angle: AngleTracker { shaft_angle: 0.0 },
-            detent: DetentState {
-                detent_center: 0.0,
-                current_position: position,
-                idle_velocity_ewma: 0.0,
-                last_idle_start: None,
-                latest_sub_position_unit: 0.0,
-            },
-            click: ClickState {
-                prev_current_position: position,
-                started_at: None,
-                dir: 1.0,
-            },
-        }
-    }
-}
-
 fn sanitize_custom_config(mut c: KnobConfig) -> KnobConfig {
     c.position_width_radians = finite_at_least(c.position_width_radians, 0.001);
     c.p_gain = finite_nonnegative(c.p_gain);
@@ -2530,208 +1826,6 @@ fn position_count(config: &KnobConfig) -> i32 {
         .and_then(|delta| delta.checked_add(1))
         .filter(|count| *count > 0)
         .unwrap_or(0)
-}
-
-fn idle_recenter(detent: &mut DetentState, shaft_angle: f64, velocity_rad_s: f64) {
-    detent.idle_velocity_ewma = velocity_rad_s.abs() * IDLE_VELOCITY_EWMA_ALPHA
-        + detent.idle_velocity_ewma * (1.0 - IDLE_VELOCITY_EWMA_ALPHA);
-    if detent.idle_velocity_ewma > IDLE_VELOCITY_RAD_PER_SEC {
-        detent.last_idle_start = None;
-    } else if detent.last_idle_start.is_none() {
-        detent.last_idle_start = Some(Instant::now());
-    }
-    if let Some(start) = detent.last_idle_start {
-        if start.elapsed() > IDLE_CORRECTION_DELAY
-            && (shaft_angle - detent.detent_center).abs() < IDLE_CORRECTION_MAX_ANGLE_RAD
-        {
-            detent.detent_center = shaft_angle * IDLE_CORRECTION_RATE_ALPHA
-                + detent.detent_center * (1.0 - IDLE_CORRECTION_RATE_ALPHA);
-        }
-    }
-}
-
-fn snap_to_detent(
-    detent: &mut DetentState,
-    shaft_angle: f64,
-    config: &KnobConfig,
-    num_positions: i32,
-) -> (f64, f64, bool) {
-    let width = config.position_width_radians;
-    let mut angle_to_detent_center = shaft_angle - detent.detent_center;
-    let snap_point_radians = width * config.snap_point;
-    let bias_radians = width * config.snap_point_bias;
-    let snap_dec = snap_point_radians
-        + if detent.current_position <= 0 {
-            bias_radians
-        } else {
-            -bias_radians
-        };
-    let snap_inc = -snap_point_radians
-        + if detent.current_position >= 0 {
-            -bias_radians
-        } else {
-            bias_radians
-        };
-
-    if angle_to_detent_center > snap_dec
-        && (num_positions <= 0 || detent.current_position > config.min_position)
-    {
-        detent.detent_center += width;
-        angle_to_detent_center -= width;
-        detent.current_position -= 1;
-    } else if angle_to_detent_center < snap_inc
-        && (num_positions <= 0 || detent.current_position < config.max_position)
-    {
-        detent.detent_center -= width;
-        angle_to_detent_center += width;
-        detent.current_position += 1;
-    }
-
-    detent.latest_sub_position_unit = -angle_to_detent_center / width;
-    let dead_zone_adjustment = angle_to_detent_center.clamp(
-        (-width * DEAD_ZONE_DETENT_PERCENT).max(-DEAD_ZONE_RAD),
-        (width * DEAD_ZONE_DETENT_PERCENT).min(DEAD_ZONE_RAD),
-    );
-    let out_of_bounds = num_positions > 0
-        && ((angle_to_detent_center > 0.0 && detent.current_position == config.min_position)
-            || (angle_to_detent_center < 0.0 && detent.current_position == config.max_position));
-    (angle_to_detent_center, dead_zone_adjustment, out_of_bounds)
-}
-
-fn compute_haptic_pid(
-    config: &KnobConfig,
-    tun: &Tuning,
-    current_position: i32,
-    angle_to_detent_center: f64,
-    dead_zone_adjustment: f64,
-    velocity_rad_s: f64,
-    out_of_bounds: bool,
-) -> f64 {
-    if velocity_rad_s.abs() > MAX_VEL_RAD_S {
-        return 0.0;
-    }
-    let mut input = -angle_to_detent_center + dead_zone_adjustment;
-    if !out_of_bounds
-        && !config.detent_positions.is_empty()
-        && !config.detent_positions.contains(&current_position)
-    {
-        input = 0.0;
-    }
-    let p_gain = if out_of_bounds {
-        config.endstop_strength_unit * 4.0
-    } else {
-        tun.p_gain
-    };
-    let pid = (p_gain * input - tun.d_gain * velocity_rad_s).clamp(-PID_LIMIT, PID_LIMIT);
-    tun.strength_scale * pid
-}
-
-fn compute_min_restoring(
-    angle_to_detent_center: f64,
-    width: f64,
-    velocity_rad_s: f64,
-    num_positions: i32,
-) -> f64 {
-    if num_positions != 1 {
-        return 0.0;
-    }
-    let abs_angle = angle_to_detent_center.abs();
-    let dead_zone = (width * DEAD_ZONE_DETENT_PERCENT).min(DEAD_ZONE_RAD);
-    if abs_angle > 0.0005
-        && abs_angle < dead_zone
-        && velocity_rad_s.abs() < IDLE_VELOCITY_RAD_PER_SEC
-    {
-        (-angle_to_detent_center).signum() * 0.00
-    } else {
-        0.0
-    }
-}
-
-fn compute_friction_coulomb(velocity_rad_s: f64, compensation: f64) -> f64 {
-    if velocity_rad_s.abs() > IDLE_VELOCITY_RAD_PER_SEC {
-        let taper = (velocity_rad_s.abs() / (IDLE_VELOCITY_RAD_PER_SEC * 10.0)).atan()
-            / std::f64::consts::FRAC_PI_2;
-        compensation * velocity_rad_s.signum() * taper
-    } else {
-        0.0
-    }
-}
-
-fn compute_click_torque(
-    click: &mut ClickState,
-    click_torque_nm: f64,
-    click_active: bool,
-    now: Instant,
-) -> f64 {
-    let Some(started_at) = click.started_at else {
-        return 0.0;
-    };
-    if !click_active {
-        return 0.0;
-    }
-    let elapsed = now.duration_since(started_at);
-    if elapsed >= CLICK_TOTAL_DURATION {
-        click.started_at = None;
-        return 0.0;
-    }
-    let sign = if elapsed < CLICK_PHASE_DURATION {
-        click.dir
-    } else {
-        -click.dir
-    };
-    sign * click_torque_nm
-}
-
-fn update_realtime_param(state: &mut RollerCanState, data: &[u8]) {
-    if data.len() < 8 {
-        return;
-    }
-    let index = u16::from_le_bytes([data[0], data[1]]);
-    let raw = i32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-    let now = Instant::now();
-    match index {
-        OD_POSITION_READBACK => state.realtime.position_deg = Some((raw as f64 / 100.0, now)),
-        OD_SPEED_READBACK => state.realtime.speed_rpm = Some((raw as f64 / 100.0, now)),
-        OD_CURRENT_READBACK => state.realtime.current_a = Some((raw as f64 / MA_X100_PER_AMP, now)),
-        _ => {}
-    }
-}
-
-fn estimate_velocity_rad_s(
-    last_sample: &mut Option<(f64, Instant)>,
-    shaft_angle: f64,
-    sample_at: Instant,
-    fallback_speed_rpm: Option<f64>,
-) -> f64 {
-    let fallback = fallback_speed_rpm.unwrap_or(0.0) * std::f64::consts::TAU / 60.0;
-    let Some((last_angle, last_at)) = *last_sample else {
-        *last_sample = Some((shaft_angle, sample_at));
-        return fallback;
-    };
-    if sample_at <= last_at {
-        return fallback;
-    }
-    let dt = sample_at.duration_since(last_at).as_secs_f64();
-    if dt <= 0.0 {
-        return fallback;
-    }
-    let velocity = (shaft_angle - last_angle) / dt;
-    *last_sample = Some((shaft_angle, sample_at));
-    if velocity.is_finite() {
-        velocity
-    } else {
-        fallback
-    }
-}
-
-fn effort_to_current_x100(current_a: f64, max_torque_permille: u16) -> i32 {
-    if !current_a.is_finite() || current_a.abs() < ROLLER_OUTPUT_DEADBAND_A {
-        return 0;
-    }
-    let safety = (CURRENT_X100_LIMIT as i64 * max_torque_permille.min(1000) as i64 / 1000) as i32;
-    (ROLLER_CURRENT_DIRECTION * current_a * MA_X100_PER_AMP)
-        .round()
-        .clamp(-(safety as f64), safety as f64) as i32
 }
 
 fn custom_parameter_values(config: &KnobConfig) -> [(u16, i32); 14] {
@@ -2799,38 +1893,16 @@ fn verification_tolerance(index: u16) -> i32 {
     }
 }
 
-fn param_frame(index: u16, value: i32) -> [u8; 8] {
-    let mut data = [0u8; 8];
-    data[0..2].copy_from_slice(&index.to_le_bytes());
-    data[4..8].copy_from_slice(&value.to_le_bytes());
-    data
-}
-
 fn read_param_frame(index: u16) -> [u8; 8] {
     let mut data = [0u8; 8];
     data[0..2].copy_from_slice(&index.to_le_bytes());
     data
 }
 
-fn scaled(value: i32) -> f64 {
-    value as f64 / SCALE
-}
-
 fn to_scaled(value: f64) -> i32 {
     (finite_or(value, 0.0) * SCALE)
         .round()
         .clamp(i32::MIN as f64, i32::MAX as f64) as i32
-}
-
-fn hex(data: &[u8]) -> String {
-    let mut s = String::with_capacity(data.len() * 3);
-    for (i, b) in data.iter().enumerate() {
-        if i > 0 {
-            s.push(' ');
-        }
-        s.push_str(&format!("{b:02X}"));
-    }
-    s
 }
 
 #[cfg(test)]
@@ -3015,7 +2087,6 @@ mod tests {
             state,
             rx_task: tokio::spawn(async {}),
             discovery_task: tokio::spawn(async {}),
-            haptic_task: StdMutex::new(None),
             running: Arc::new(AtomicBool::new(false)),
             requested_config: Arc::new(StdMutex::new(0)),
             tuning: Arc::new(StdMutex::new(Tuning::from_config(&configs[0]))),
@@ -3023,11 +2094,9 @@ mod tests {
                 configs.iter().map(Tuning::from_config).collect(),
             )),
             custom_config: Arc::new(StdMutex::new(configs[0].clone())),
-            custom_config_dirty: Arc::new(AtomicBool::new(false)),
             target_id: StdMutex::new(None),
             next_response_host_id: AtomicU8::new(1),
             send_lock: Arc::new(tokio::sync::Mutex::new(())),
-            t0: Instant::now(),
         }
     }
 
@@ -3245,8 +2314,9 @@ mod tests {
     async fn failed_disable_keeps_session_active_for_stop_retry() {
         let bus = Arc::new(FakeBus::default());
         bus.fail_on(2); // zero succeeds, first disable attempt fails
-        let session = test_session(bus);
+        let session = test_session(bus.clone());
         session.running.store(true, Ordering::SeqCst);
+        *session.target_id.lock().unwrap() = Some(0xA8);
         session
             .state
             .lock()
@@ -3266,10 +2336,20 @@ mod tests {
         assert!(session.stop_motor(0, 0xA8).await.is_err());
         assert!(session.running.load(Ordering::SeqCst));
         assert!(session.knob_state(0xA8).running);
+        assert_eq!(*session.target_id.lock().unwrap(), Some(0xA8));
 
         assert!(session.stop_motor(0, 0xA8).await.is_ok());
         assert!(!session.running.load(Ordering::SeqCst));
         assert!(!session.knob_state(0xA8).running);
+        assert_eq!(*session.target_id.lock().unwrap(), None);
+
+        let sent_after_confirmed_stop = bus.params();
+        session.stop().await;
+        assert_eq!(
+            bus.params(),
+            sent_after_confirmed_stop,
+            "session teardown repeated an already-confirmed disable"
+        );
     }
 
     #[tokio::test]
@@ -3658,44 +2738,5 @@ mod tests {
         );
         assert_eq!(tuning.friction_compensation, cfg.friction_compensation);
         assert_eq!(tuning.click_torque_nm, cfg.click_torque_nm);
-    }
-
-    #[test]
-    fn output_deadband_suppresses_small_current_commands() {
-        assert_eq!(
-            effort_to_current_x100(ROLLER_OUTPUT_DEADBAND_A * 0.5, 1000),
-            0
-        );
-        assert_eq!(
-            effort_to_current_x100(-ROLLER_OUTPUT_DEADBAND_A * 0.5, 1000),
-            0
-        );
-        assert_ne!(
-            effort_to_current_x100(ROLLER_OUTPUT_DEADBAND_A * 1.5, 1000),
-            0
-        );
-    }
-
-    #[test]
-    fn click_pulse_uses_two_millisecond_phases() {
-        let now = Instant::now();
-        let mut click = ClickState {
-            prev_current_position: 0,
-            started_at: Some(now),
-            dir: 1.0,
-        };
-
-        assert_eq!(
-            compute_click_torque(&mut click, 0.5, true, now + Duration::from_millis(1)),
-            0.5
-        );
-        assert_eq!(
-            compute_click_torque(&mut click, 0.5, true, now + Duration::from_millis(3)),
-            -0.5
-        );
-        assert_eq!(
-            compute_click_torque(&mut click, 0.5, true, now + Duration::from_millis(4)),
-            0.0
-        );
     }
 }

@@ -95,19 +95,6 @@ export function SmartKnobPanel({ connected }: { connected: boolean }) {
     return result;
   }, []);
 
-  // Best-effort safety stop both when navigating away and when the window is
-  // closed. Backend disconnect/exit handling remains the final safety net.
-  useEffect(() => {
-    const stopActiveSession = () => {
-      void api.smartknobStop().catch(() => {});
-    };
-    window.addEventListener("beforeunload", stopActiveSession);
-    return () => {
-      window.removeEventListener("beforeunload", stopActiveSession);
-      stopActiveSession();
-    };
-  }, []);
-
   // Discover both CANopen and RollerCAN knobs through the shared bus manager.
   useEffect(() => {
     if (!connected) {
@@ -123,7 +110,10 @@ export function SmartKnobPanel({ connected }: { connected: boolean }) {
     }
 
     let alive = true;
+    let inFlight = false;
     const tick = async () => {
+      if (!alive || inFlight) return;
+      inFlight = true;
       try {
         const list = await api.smartknobListDevices();
         if (!alive) return;
@@ -154,6 +144,8 @@ export function SmartKnobPanel({ connected }: { connected: boolean }) {
         });
       } catch {
         // Discovery is best-effort; a later poll normally recovers.
+      } finally {
+        inFlight = false;
       }
     };
 
@@ -205,7 +197,10 @@ export function SmartKnobPanel({ connected }: { connected: boolean }) {
   useEffect(() => {
     if (!running) return;
     let alive = true;
+    let inFlight = false;
     const tick = async () => {
+      if (!alive || inFlight) return;
+      inFlight = true;
       try {
         const nextState = await api.smartknobGetState();
         if (!alive) return;
@@ -236,6 +231,8 @@ export function SmartKnobPanel({ connected }: { connected: boolean }) {
         }
       } catch {
         // A transient state read must not stop a running haptic session.
+      } finally {
+        inFlight = false;
       }
     };
 
