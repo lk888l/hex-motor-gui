@@ -3,7 +3,7 @@
 // snake_case parameters.
 
 import { invoke } from "@tauri-apps/api/core";
-import type { ArmInfo, ArmUrdf, BaseInfo, CanAggReply, CanAnalyzerStatus, CanBusHealth, CanFilterSpec, CanSendSpec, CanTraceReply, ConfigGetDto, ConfigSetResult, ConfigValidateResult, ControllerInfo, EventsSnapshot, Hopea3InitProgress, Hopea3State, ImuState, KnobConfig, LiftState, LiveState, LogLine, MotorInfo, MotorMode, MotorTarget, RestartResult, SmartKnobState, ZenohArmState, ZenohBaseState , EeInfo, RobotNode, ZenohEeState, SceneRobot, ConsoleUrdf, MountEdge} from "./types";
+import type { ArmInfo, ArmUrdf, BaseInfo, CanAggReply, CanAnalyzerStatus, CanBusHealth, CanFilterSpec, CanSendSpec, CanTraceReply, ConfigGetDto, ConfigSetResult, ConfigValidateResult, ControllerInfo, EventsSnapshot, Hopea3InitProgress, Hopea3State, ImuState, KnobConfig, LiftState, LiveState, LogLine, MotorInfo, MotorMode, MotorTarget, RestartResult, SmartKnobState, ZenohArmState, ZenohBaseState , EeInfo, RobotNode, ZenohEeState, SceneRobot, ConsoleUrdf, MountEdge, WifiController, WifiJob, WifiSavedNetwork, WifiScanEntry, WifiStatus} from "./types";
 
 export const api = {
   connect: (iface: string, ourNid: number, broadcastHeartbeat: boolean) =>
@@ -206,6 +206,27 @@ export const api = {
   eeScene: () => invoke<SceneRobot[]>("ee_scene"),
   consoleGetUrdf: (prefix: string, kindName: string) => invoke<ConsoleUrdf | null>("console_get_urdf", { prefix, kindName }),
   eeMachines: () => invoke<Record<string, MountEdge[]>>("ee_machines"),
+
+  // Controller Wi-Fi (reuses Robot Console's EE Zenoh session)
+  wifiDiscover: () => invoke<WifiController[]>("wifi_discover"),
+  wifiStatus: (cid: string) => invoke<WifiStatus>("wifi_status", { cid }),
+  wifiScan: (cid: string) => invoke<WifiScanEntry[]>("wifi_scan", { cid }),
+  wifiNetworks: (cid: string) => invoke<WifiSavedNetwork[]>("wifi_networks", { cid }),
+  wifiValidate: (cid: string, ssid: string, passphrase: string, hidden: boolean, country: string | null) =>
+    invoke<void>("wifi_validate", { cid, ssid, passphrase, hidden, country }),
+  wifiSet: (
+    cid: string,
+    ssid: string,
+    passphrase: string,
+    hidden: boolean,
+    country: string | null,
+    expectedRevision: number | null,
+  ) => invoke<WifiJob>("wifi_set", { cid, ssid, passphrase, hidden, country, expectedRevision }),
+  wifiForget: (cid: string, ssidHex: string, expectedRevision: number | null) =>
+    invoke<WifiJob>("wifi_forget", { cid, ssidHex, expectedRevision }),
+  wifiForgetAll: (cid: string, expectedRevision: number | null) =>
+    invoke<WifiJob>("wifi_forget_all", { cid, expectedRevision }),
+  wifiJob: (cid: string, jobId: string) => invoke<WifiJob>("wifi_job", { cid, jobId }),
 
   // Controller Config(Zenoh)
   configConnect: (connect: string) => invoke<void>("config_connect", { connect }),
